@@ -14,6 +14,8 @@ from .estimators import estimate_primary, estimate_guardrails, ols_cross_check, 
 from .robustness import run_robustness
 from .reporting import write_tables, write_figure_profit_ci, write_metadata
 from .stats import holm_adjust
+from data import build_processed, normalize_columns, validate_schema, validate_values, clean_data
+from data_summary import write_summary
 
 
 def parse_args() -> argparse.Namespace:
@@ -30,7 +32,23 @@ def main() -> None:
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    df_raw = load_csv(cfg["data"]["input_csv"])
+    data_cfg = cfg["data"]
+    raw_dir = data_cfg.get("raw_dir")
+    processed_path = data_cfg.get("processed_path", "data/processed/hillstrom_clean.csv")
+
+    if raw_dir:
+        processed = build_processed(Path(raw_dir), Path(processed_path))
+        df_raw = load_csv(processed)
+    else:
+        df_raw = load_csv(data_cfg["input_csv"])
+        df_raw = normalize_columns(df_raw)
+        validate_schema(df_raw)
+        validate_values(df_raw)
+        df_raw = clean_data(df_raw)
+        Path(processed_path).parent.mkdir(parents=True, exist_ok=True)
+        df_raw.to_csv(processed_path, index=False)
+
+    write_summary(df_raw, output_dir)
     df, cleaning_df = prepare_data(df_raw, cfg)
 
     issues = data_sanity(df, cfg)
