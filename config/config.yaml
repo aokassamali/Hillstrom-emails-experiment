@@ -1,0 +1,65 @@
+﻿project:
+  name: Hillstrom Email Marketing Experiment
+
+data:
+  input_csv: C:\Users\aokas\Downloads\emaildataset
+  id_col: customer_id
+  arm_col: segment
+  arm_map:
+    control:
+      - control
+      - no e-mail
+      - no email
+      - no e-mail
+      - no email
+    mens:
+      - mens
+      - mens e-mail
+      - mens email
+    womens:
+      - womens
+      - womens e-mail
+      - womens email
+  visit_col: visit
+  conversion_col: conversion
+  spend_col: spend
+  balance_covariates:
+    - Recency  # TODO: confirm exact column casing in the CSV
+    - History
+    - History_Segment
+    - Mens
+    - Womens
+    - Zip_Code
+    - Newbie
+    - Channel
+  adjustment_covariates:
+    - Recency  # TODO: confirm exact column casing in the CSV
+    - History
+    - Newbie
+    - Mens
+    - Womens
+    - Channel
+    - Zip_Code
+  duplicate_policy: drop_all  # drop_all or keep_first
+
+srm:
+  expected_allocation:
+    control: 0.3333333333
+    mens: 0.3333333333
+    womens: 0.3333333333
+  practical_delta_pp: 2.0  # TODO: confirm practical SRM deviation threshold
+
+profit:
+  margin: 0.40
+  email_cost: 0.01
+
+mes:
+  min_effect: 0.05
+
+bootstrap:
+  iterations: 10000
+  seed: 20240101
+
+guardrails:
+  visit_delta_pp: -0.2
+  conversion_delta_pp: -0.1
