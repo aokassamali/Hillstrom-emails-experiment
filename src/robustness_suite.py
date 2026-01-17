@@ -50,16 +50,9 @@ def _winsorize_upper(values: np.ndarray, cap: float) -> Tuple[np.ndarray, int]:
     return capped, int(np.sum(values > cap))
 
 
-def _trim_upper(values: np.ndarray, trim_frac: float) -> Tuple[np.ndarray, int]:
-    if trim_frac <= 0:
-        return values, 0
-    n = len(values)
-    k = int(np.floor(n * trim_frac))
-    if k <= 0:
-        return values, 0
-    threshold = np.partition(values, -k)[-k]
+def _trim_upper_by_threshold(values: np.ndarray, threshold: float) -> Tuple[np.ndarray, int]:
     trimmed = values[values <= threshold]
-    return trimmed, int(n - len(trimmed))
+    return trimmed, int(len(values) - len(trimmed))
 
 
 def _topk_remove(values: np.ndarray, k: int) -> Tuple[np.ndarray, int]:
@@ -89,7 +82,9 @@ def compute_robustness(
     df = df.copy()
     df["emailed"] = df["arm"].isin(["mens", "womens"]).astype(int)
     spend = pd.to_numeric(df[spend_col], errors="coerce").fillna(0.0).to_numpy()
-    pooled_p99 = float(np.quantile(spend, 0.99))
+    spend_pos = spend[spend > 0]
+    pooled_p99 = float(np.quantile(spend_pos, 0.99)) if len(spend_pos) else 0.0
+    pooled_trim = float(np.quantile(spend_pos, 1 - trim_frac)) if len(spend_pos) else 0.0
 
     results: List[RobustResult] = []
     suspicious_flags: Dict[str, int] = {}
@@ -126,18 +121,22 @@ def compute_robustness(
         c_spend_w, c_cap = _winsorize_upper(c_spend, pooled_p99)
         t_profit_w = _profit_from_spend(t_spend_w, t_email, margin, email_cost)
         c_profit_w = _profit_from_spend(c_spend_w, c_email, margin, email_cost)
-        notes = f"sensitivity;cap_p99={pooled_p99:.4f};capped_t={t_cap};capped_c={c_cap}"
+        notes = f"sensitivity;cap_p99_pos={pooled_p99:.4f};capped_t={t_cap};capped_c={c_cap}"
         diffs = _bootstrap_diff(t_profit_w, c_profit_w, n_boot, seed)
         add_result("profit_winsor_p99", arm, float(t_profit_w.mean() - c_profit_w.mean()), diffs, notes)
         diffs = _bootstrap_diff(t_spend_w, c_spend_w, n_boot, seed)
         add_result("spend_winsor_p99", arm, float(t_spend_w.mean() - c_spend_w.mean()), diffs, notes)
 
-        # Trim upper tail
-        t_spend_t, t_trim = _trim_upper(t_spend, trim_frac)
-        c_spend_t, c_trim = _trim_upper(c_spend, trim_frac)
+        # Trim upper tail (based on pooled positive spend threshold)
+        if pooled_trim > 0:
+            t_spend_t, t_trim = _trim_upper_by_threshold(t_spend, pooled_trim)
+            c_spend_t, c_trim = _trim_upper_by_threshold(c_spend, pooled_trim)
+        else:
+            t_spend_t, t_trim = t_spend, 0
+            c_spend_t, c_trim = c_spend, 0
         t_profit_t = _profit_from_spend(t_spend_t, np.ones_like(t_spend_t), margin, email_cost)
         c_profit_t = _profit_from_spend(c_spend_t, np.zeros_like(c_spend_t), margin, email_cost)
-        notes = f"sensitivity;trim_upper={trim_frac};trim_t={t_trim};trim_c={c_trim}"
+        notes = f"sensitivity;trim_upper={trim_frac};trim_threshold_pos={pooled_trim:.4f};trim_t={t_trim};trim_c={c_trim}"
         diffs = _bootstrap_diff(t_profit_t, c_profit_t, n_boot, seed)
         add_result("profit_trim_upper", arm, float(t_profit_t.mean() - c_profit_t.mean()), diffs, notes)
         diffs = _bootstrap_diff(t_spend_t, c_spend_t, n_boot, seed)
