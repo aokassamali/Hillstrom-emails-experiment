@@ -77,3 +77,21 @@ def plot_influence_top_share(influence: pd.DataFrame, path: Path) -> None:
     plt.tight_layout()
     plt.savefig(path, dpi=150)
     plt.close()
+
+
+def plot_tail_sensitivity(df: pd.DataFrame, path: Path) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if df.empty:
+        return
+    plt.figure(figsize=(7, 4))
+    for arm, group in df.groupby("arm"):
+        plt.plot(group["x_removed"], group["tau_hat"], marker="o", label=arm)
+    plt.axhline(0.0, color="black", linewidth=1)
+    plt.title("Profit Uplift vs Control by Tail Removal")
+    plt.xlabel("Fraction removed (top spend by rank)")
+    plt.ylabel("Profit uplift")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(path, dpi=150)
+    plt.close()

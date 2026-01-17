@@ -12,7 +12,7 @@ def mens_vs_womens(
     arm_col: str = "arm",
     n_boot: int = 10000,
     seed: int = 0,
-) -> Tuple[float, float, float, float]:
+) -> Tuple[float, float, float, float, float, int, int]:
     mens = pd.to_numeric(df[df[arm_col] == "mens"][outcome], errors="coerce").dropna().to_numpy()
     womens = pd.to_numeric(df[df[arm_col] == "womens"][outcome], errors="coerce").dropna().to_numpy()
     if len(mens) == 0 or len(womens) == 0:
@@ -26,5 +26,7 @@ def mens_vs_womens(
         diffs[i] = m.mean() - w.mean()
     ci_low = float(np.percentile(diffs, 2.5))
     ci_high = float(np.percentile(diffs, 97.5))
-    p_value = float((np.sum(np.abs(diffs) >= abs(estimate)) + 1.0) / (len(diffs) + 1.0))
-    return estimate, ci_low, ci_high, p_value
+    p_ge_0 = float((np.sum(diffs >= 0.0) + 1.0) / (len(diffs) + 1.0))
+    p_le_0 = float((np.sum(diffs <= 0.0) + 1.0) / (len(diffs) + 1.0))
+    p_two = float(2 * min(p_ge_0, p_le_0))
+    return estimate, ci_low, ci_high, p_two, p_ge_0, n_boot, seed

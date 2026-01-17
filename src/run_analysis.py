@@ -13,7 +13,7 @@ from data import build_processed, clean_data, normalize_columns, validate_schema
 from data_summary import write_summary
 from estimation import bootstrap_ci, estimate_diff_in_means, holm_adjust
 from experiment_checks import balance_table
-from plots import plot_arm_sizes, plot_outcome_means_ci, plot_uplift_ci, plot_influence_top_share
+from plots import plot_arm_sizes, plot_outcome_means_ci, plot_uplift_ci, plot_influence_top_share, plot_tail_sensitivity
 from hillstrom_emails.cleaning import normalize_arm
 from hillstrom_emails.config import load_config
 from hillstrom_emails.checks import srm_check
@@ -146,6 +146,11 @@ def main() -> None:
     write_summary(df, output_dir)
 
     df = _canonicalize_arms(df, data_cfg["arm_col"], data_cfg["arm_map"])
+    id_col = data_cfg.get("id_col")
+    if not id_col or id_col not in df.columns:
+        df = df.reset_index(drop=True)
+        df["__row_id__"] = df.index.astype(str)
+        id_col = "__row_id__"
 
     margin = cfg["profit"]["margin"]
     email_cost = cfg["profit"]["email_cost"]
@@ -219,8 +224,8 @@ def main() -> None:
             t = pd.to_numeric(df[df["arm"] == arm]["profit"], errors="coerce").dropna().to_numpy()
             c = pd.to_numeric(df[df["arm"] == "control"]["profit"], errors="coerce").dropna().to_numpy()
             p_vals.append(_bootstrap_p_one_sided(t, c, n_boot, seed))
-        profit_uplift["p_value_raw"] = p_vals
-        profit_uplift["p_value_holm"] = holm_adjust(profit_uplift["p_value_raw"].to_numpy())
+        profit_uplift["p_value_one_sided"] = p_vals
+        profit_uplift["p_value_holm"] = holm_adjust(profit_uplift["p_value_one_sided"].to_numpy())
         profit_uplift["reject_holm"] = profit_uplift["p_value_holm"] < 0.05
         mes = float(cfg["mes"]["min_effect"])
         profit_uplift["mes_pass"] = profit_uplift["estimate"] >= mes
@@ -263,7 +268,7 @@ def main() -> None:
                 "tau_hat",
                 "ci_lower",
                 "ci_upper",
-                "p_value_raw",
+                "p_value_one_sided",
                 "p_value_holm",
                 "reject_holm",
                 "mes_pass",
@@ -284,6 +289,7 @@ def main() -> None:
         robustness = compute_robustness(
             df,
             spend_col=data_cfg["spend_col"],
+            id_col=id_col,
             margin=cfg["profit"]["margin"],
             email_cost=cfg["profit"]["email_cost"],
             n_boot=n_boot,
@@ -306,29 +312,74 @@ def main() -> None:
         # Mens vs Womens direct comparison
         rows = []
         for outcome in ["profit", data_cfg["spend_col"]]:
-            est, ci_low, ci_high, p_value = mens_vs_womens(df, outcome, "arm", n_boot, seed)
+            est, ci_low, ci_high, p_two, p_gt_0, B, seed_used = mens_vs_womens(df, outcome, "arm", n_boot, seed)
             rows.append(
                 {
-                    "outcome": outcome,
-                    "estimate": est,
+                    "metric": outcome,
+                    "delta_hat": est,
                     "ci_lower": ci_low,
                     "ci_upper": ci_high,
-                    "p_value_two_sided": p_value,
-                    "notes": "exploratory_two_sided",
+                    "p_two_sided": p_two,
+                    "p_delta_gt_0": p_gt_0,
+                    "B": B,
+                    "seed": seed_used,
+                    "notes": "exploratory_two_sided_bootstrap",
                 }
             )
         mens_womens = pd.DataFrame(rows)
         mens_womens.to_csv(tables_dir / "mens_vs_womens.csv", index=False)
 
         # Influence diagnostics
-        influence = build_influence_table(df, data_cfg["spend_col"], "arm", "control")
+        influence = build_influence_table(
+            df,
+            data_cfg["spend_col"],
+            "arm",
+            "control",
+            id_col=id_col,
+            margin=cfg["profit"]["margin"],
+            email_cost=cfg["profit"]["email_cost"],
+        )
         influence.to_csv(tables_dir / "influence.csv", index=False)
-        plot_influence_top_share(influence, figures_dir / "influence_top_share.png")
+        plot_influence_top_share(influence, figures_dir / "influence_shares.png")
+
+        # Tail sensitivity curve for profit
+        tail_rows = []
+        for x in [0.0, 0.001, 0.005, 0.01, 0.02]:
+            for arm in ["mens", "womens"]:
+                t = df[df["arm"] == arm].copy()
+                c = df[df["arm"] == "control"].copy()
+                if x > 0:
+                    t_spend = pd.to_numeric(t[data_cfg["spend_col"]], errors="coerce").fillna(0.0).to_numpy()
+                    c_spend = pd.to_numeric(c[data_cfg["spend_col"]], errors="coerce").fillna(0.0).to_numpy()
+                    t_ids = t[id_col].astype(str).to_numpy()
+                    c_ids = c[id_col].astype(str).to_numpy()
+                    t_k = int(np.ceil(x * len(t_spend)))
+                    c_k = int(np.ceil(x * len(c_spend)))
+                    t_idx = np.lexsort((t_ids, -t_spend))[:t_k]
+                    c_idx = np.lexsort((c_ids, -c_spend))[:c_k]
+                    t = t.drop(t.index[t_idx])
+                    c = c.drop(c.index[c_idx])
+                t_profit = cfg["profit"]["margin"] * t[data_cfg["spend_col"]] - cfg["profit"]["email_cost"]
+                c_profit = cfg["profit"]["margin"] * c[data_cfg["spend_col"]]
+                tau = float(t_profit.mean() - c_profit.mean())
+                tail_rows.append({"arm": arm, "x_removed": x, "tau_hat": tau})
+        tail_df = pd.DataFrame(tail_rows)
+        tail_df.to_csv(tables_dir / "tail_sensitivity_profit.csv", index=False)
+        plot_tail_sensitivity(tail_df, figures_dir / "tail_sensitivity_profit.png")
     else:
         pd.DataFrame().to_csv(tables_dir / "robustness.csv", index=False)
         pd.DataFrame().to_csv(tables_dir / "two_part.csv", index=False)
         pd.DataFrame().to_csv(tables_dir / "mens_vs_womens.csv", index=False)
         pd.DataFrame().to_csv(tables_dir / "influence.csv", index=False)
+        pd.DataFrame().to_csv(tables_dir / "tail_sensitivity_profit.csv", index=False)
+
+    git_hash = None
+    try:
+        import subprocess
+
+        git_hash = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+    except Exception:
+        git_hash = None
 
     metadata = {
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
@@ -345,6 +396,11 @@ def main() -> None:
         "srm": {
             "expected_allocation": cfg["srm"].get("expected_allocation"),
         },
+        "bootstrap": {
+            "B": n_boot,
+            "seed": seed,
+        },
+        "git_commit": git_hash,
     }
     with open(output_dir / "run_metadata.json", "w", encoding="utf-8") as f:
         json.dump(metadata, f, indent=2)

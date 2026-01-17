@@ -1,178 +1,348 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from typing import Dict, Iterable, List, Tuple
 
 import numpy as np
 import pandas as pd
 
 
 @dataclass
-class RobustResult:
+class RobustRow:
+    metric: str
     method: str
     arm: str
     tau_hat: float
     ci_lower: float
     ci_upper: float
+    cap_value: float
+    trim_threshold: float
+    n_capped_t: int
+    n_capped_c: int
+    n_trim_t: int
+    n_trim_c: int
+    seed: int
+    B: int
     notes: str
 
 
-def _bootstrap_diff(
-    treat: np.ndarray,
-    control: np.ndarray,
-    n_boot: int,
-    seed: int,
-) -> np.ndarray:
-    rng = np.random.default_rng(seed)
-    n_t = len(treat)
-    n_c = len(control)
-    diffs = np.empty(n_boot, dtype=float)
-    for i in range(n_boot):
-        t = rng.choice(treat, size=n_t, replace=True)
-        c = rng.choice(control, size=n_c, replace=True)
-        diffs[i] = t.mean() - c.mean()
-    return diffs
-
-
-def _ci_from_boot(diffs: np.ndarray, alpha: float = 0.05) -> Tuple[float, float]:
-    return (
-        float(np.percentile(diffs, 100 * (alpha / 2))),
-        float(np.percentile(diffs, 100 * (1 - alpha / 2))),
-    )
-
-
-def _profit_from_spend(spend: np.ndarray, emailed: np.ndarray, margin: float, email_cost: float) -> np.ndarray:
+def _profit(spend: np.ndarray, emailed: np.ndarray, margin: float, email_cost: float) -> np.ndarray:
     return margin * spend - email_cost * emailed
 
 
-def _winsorize_upper(values: np.ndarray, cap: float) -> Tuple[np.ndarray, int]:
-    capped = np.minimum(values, cap)
-    return capped, int(np.sum(values > cap))
+def _bootstrap_resample(values: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+    return rng.choice(values, size=len(values), replace=True)
 
 
-def _trim_upper_by_threshold(values: np.ndarray, threshold: float) -> Tuple[np.ndarray, int]:
-    trimmed = values[values <= threshold]
-    return trimmed, int(len(values) - len(trimmed))
+def _pooled_pos_threshold(values: np.ndarray, q: float) -> float:
+    pos = values[values > 0]
+    if len(pos) == 0:
+        return 0.0
+    return float(np.quantile(pos, q))
 
 
-def _topk_remove(values: np.ndarray, k: int) -> Tuple[np.ndarray, int]:
+def _top_k_indices(spend: np.ndarray, ids: np.ndarray, k: int) -> np.ndarray:
     if k <= 0:
-        return values, 0
-    if k >= len(values):
-        return np.array([], dtype=float), len(values)
-    threshold = np.partition(values, -k)[-k]
-    kept = values[values < threshold]
-    removed = len(values) - len(kept)
-    return kept, removed
+        return np.array([], dtype=int)
+    order = np.lexsort((ids, -spend))
+    return order[:k]
+
+
+def _pooled_trim_indices(spend: np.ndarray, ids: np.ndarray, k: int) -> np.ndarray:
+    if k <= 0:
+        return np.array([], dtype=int)
+    pos_mask = spend > 0
+    spend_pos = spend[pos_mask]
+    ids_pos = ids[pos_mask]
+    if len(spend_pos) == 0:
+        return np.array([], dtype=int)
+    order = np.lexsort((ids_pos, -spend_pos))
+    pos_indices = np.flatnonzero(pos_mask)
+    return pos_indices[order[:k]]
+
+
+def _remove_indices(values: np.ndarray, remove_idx: np.ndarray) -> np.ndarray:
+    if len(remove_idx) == 0:
+        return values
+    mask = np.ones(len(values), dtype=bool)
+    mask[remove_idx] = False
+    return values[mask]
+
+
+def _diff_mean(treat: np.ndarray, control: np.ndarray) -> float:
+    return float(treat.mean() - control.mean())
 
 
 def compute_robustness(
     df: pd.DataFrame,
     spend_col: str,
+    id_col: str,
     margin: float,
     email_cost: float,
     n_boot: int,
     seed: int,
-    trim_frac: float = 0.01,
-    topk_list: List[int] | None = None,
 ) -> pd.DataFrame:
-    if topk_list is None:
-        topk_list = [10, 50]
-
     df = df.copy()
     df["emailed"] = df["arm"].isin(["mens", "womens"]).astype(int)
-    spend = pd.to_numeric(df[spend_col], errors="coerce").fillna(0.0).to_numpy()
-    spend_pos = spend[spend > 0]
-    pooled_p99 = float(np.quantile(spend_pos, 0.99)) if len(spend_pos) else 0.0
-    pooled_trim = float(np.quantile(spend_pos, 1 - trim_frac)) if len(spend_pos) else 0.0
 
-    results: List[RobustResult] = []
-    suspicious_flags: Dict[str, int] = {}
+    results: List[RobustRow] = []
 
-    def add_result(method: str, arm: str, tau_hat: float, diffs: np.ndarray, notes: str) -> None:
-        ci_low, ci_high = _ci_from_boot(diffs)
-        if abs(tau_hat + email_cost) < 1e-12 and method.startswith(("profit_winsor", "profit_trim")):
-            suspicious_flags[method] = suspicious_flags.get(method, 0) + 1
-            notes = (notes + ";FLAG_CONSTANT_MINUS_COST").strip(";")
-        results.append(
-            RobustResult(method=method, arm=arm, tau_hat=float(tau_hat), ci_lower=ci_low, ci_upper=ci_high, notes=notes)
-        )
+    arms = ["mens", "womens"]
+    control_arm = "control"
 
-    for arm in ["mens", "womens"]:
+    # Precompute for baseline and diagnostics on full sample
+    spend_all = pd.to_numeric(df[spend_col], errors="coerce").fillna(0.0).to_numpy()
+    ids_all = df[id_col].astype(str).to_numpy()
+    cap_p95 = _pooled_pos_threshold(spend_all, 0.95)
+    cap_p975 = _pooled_pos_threshold(spend_all, 0.975)
+
+    pos_mask = spend_all > 0
+    n_pos_pooled = int(pos_mask.sum())
+    k_trim = int(np.ceil(0.01 * n_pos_pooled)) if n_pos_pooled else 0
+    trim_idx_pooled = _pooled_trim_indices(spend_all, ids_all, k_trim)
+    trim_threshold = float(np.max(spend_all[trim_idx_pooled])) if k_trim > 0 else 0.0
+
+    def bootstrap_diffs(t_vals: np.ndarray, c_vals: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+        diffs = np.empty(n_boot, dtype=float)
+        for i in range(n_boot):
+            t = _bootstrap_resample(t_vals, rng)
+            c = _bootstrap_resample(c_vals, rng)
+            diffs[i] = t.mean() - c.mean()
+        return diffs
+
+    for arm in arms:
         treat = df[df["arm"] == arm]
-        control = df[df["arm"] == "control"]
+        control = df[df["arm"] == control_arm]
 
         t_spend = pd.to_numeric(treat[spend_col], errors="coerce").fillna(0.0).to_numpy()
         c_spend = pd.to_numeric(control[spend_col], errors="coerce").fillna(0.0).to_numpy()
         t_email = treat["emailed"].to_numpy()
         c_email = control["emailed"].to_numpy()
+        t_id = treat[id_col].astype(str).to_numpy()
+        c_id = control[id_col].astype(str).to_numpy()
 
-        # Baseline (primary estimand)
-        t_profit = _profit_from_spend(t_spend, t_email, margin, email_cost)
-        c_profit = _profit_from_spend(c_spend, c_email, margin, email_cost)
-        diffs = _bootstrap_diff(t_profit, c_profit, n_boot, seed)
-        add_result("profit_baseline", arm, float(t_profit.mean() - c_profit.mean()), diffs, "primary_ate")
+        # Baseline
+        t_profit = _profit(t_spend, t_email, margin, email_cost)
+        c_profit = _profit(c_spend, c_email, margin, email_cost)
+        rng = np.random.default_rng(seed)
+        diffs = bootstrap_diffs(t_profit, c_profit, rng)
+        results.append(
+            RobustRow(
+                metric="profit",
+                method="baseline_mean",
+                arm=arm,
+                tau_hat=_diff_mean(t_profit, c_profit),
+                ci_lower=float(np.percentile(diffs, 2.5)),
+                ci_upper=float(np.percentile(diffs, 97.5)),
+                cap_value=0.0,
+                trim_threshold=0.0,
+                n_capped_t=0,
+                n_capped_c=0,
+                n_trim_t=0,
+                n_trim_c=0,
+                seed=seed,
+                B=n_boot,
+                notes="primary_ate",
+            )
+        )
+        rng = np.random.default_rng(seed)
+        diffs = bootstrap_diffs(t_spend, c_spend, rng)
+        results.append(
+            RobustRow(
+                metric="spend",
+                method="baseline_mean",
+                arm=arm,
+                tau_hat=_diff_mean(t_spend, c_spend),
+                ci_lower=float(np.percentile(diffs, 2.5)),
+                ci_upper=float(np.percentile(diffs, 97.5)),
+                cap_value=0.0,
+                trim_threshold=0.0,
+                n_capped_t=0,
+                n_capped_c=0,
+                n_trim_t=0,
+                n_trim_c=0,
+                seed=seed,
+                B=n_boot,
+                notes="primary_ate",
+            )
+        )
 
-        diffs = _bootstrap_diff(t_spend, c_spend, n_boot, seed)
-        add_result("spend_baseline", arm, float(t_spend.mean() - c_spend.mean()), diffs, "primary_ate")
+        # Winsorize pooled positive p95/p97.5
+        for cap, label in [(cap_p95, "winsorize_pos_p95"), (cap_p975, "winsorize_pos_p975")]:
+            t_cap = int(np.sum((t_spend > 0) & (t_spend > cap)))
+            c_cap = int(np.sum((c_spend > 0) & (c_spend > cap)))
+            t_spend_w = np.where(t_spend > cap, cap, t_spend)
+            c_spend_w = np.where(c_spend > cap, cap, c_spend)
+            t_profit_w = _profit(t_spend_w, t_email, margin, email_cost)
+            c_profit_w = _profit(c_spend_w, c_email, margin, email_cost)
+            rng = np.random.default_rng(seed)
+            diffs = bootstrap_diffs(t_profit_w, c_profit_w, rng)
+            results.append(
+                RobustRow(
+                    metric="profit",
+                    method=label,
+                    arm=arm,
+                    tau_hat=_diff_mean(t_profit_w, c_profit_w),
+                    ci_lower=float(np.percentile(diffs, 2.5)),
+                    ci_upper=float(np.percentile(diffs, 97.5)),
+                    cap_value=cap,
+                    trim_threshold=0.0,
+                    n_capped_t=t_cap,
+                    n_capped_c=c_cap,
+                    n_trim_t=0,
+                    n_trim_c=0,
+                    seed=seed,
+                    B=n_boot,
+                    notes="sensitivity;pooled_pos_cap",
+                )
+            )
+            rng = np.random.default_rng(seed)
+            diffs = bootstrap_diffs(t_spend_w, c_spend_w, rng)
+            results.append(
+                RobustRow(
+                    metric="spend",
+                    method=label,
+                    arm=arm,
+                    tau_hat=_diff_mean(t_spend_w, c_spend_w),
+                    ci_lower=float(np.percentile(diffs, 2.5)),
+                    ci_upper=float(np.percentile(diffs, 97.5)),
+                    cap_value=cap,
+                    trim_threshold=0.0,
+                    n_capped_t=t_cap,
+                    n_capped_c=c_cap,
+                    n_trim_t=0,
+                    n_trim_c=0,
+                    seed=seed,
+                    B=n_boot,
+                    notes="sensitivity;pooled_pos_cap",
+                )
+            )
 
-        # Winsorization pooled p99
-        t_spend_w, t_cap = _winsorize_upper(t_spend, pooled_p99)
-        c_spend_w, c_cap = _winsorize_upper(c_spend, pooled_p99)
-        t_profit_w = _profit_from_spend(t_spend_w, t_email, margin, email_cost)
-        c_profit_w = _profit_from_spend(c_spend_w, c_email, margin, email_cost)
-        notes = f"sensitivity;cap_p99_pos={pooled_p99:.4f};capped_t={t_cap};capped_c={c_cap}"
-        diffs = _bootstrap_diff(t_profit_w, c_profit_w, n_boot, seed)
-        add_result("profit_winsor_p99", arm, float(t_profit_w.mean() - c_profit_w.mean()), diffs, notes)
-        diffs = _bootstrap_diff(t_spend_w, c_spend_w, n_boot, seed)
-        add_result("spend_winsor_p99", arm, float(t_spend_w.mean() - c_spend_w.mean()), diffs, notes)
+        # Trim pooled top 1% positive by rank
+        t_trim_idx = _pooled_trim_indices(t_spend, t_id, k_trim) if k_trim > 0 else np.array([], dtype=int)
+        c_trim_idx = _pooled_trim_indices(c_spend, c_id, k_trim) if k_trim > 0 else np.array([], dtype=int)
+        t_spend_t = _remove_indices(t_spend, t_trim_idx)
+        c_spend_t = _remove_indices(c_spend, c_trim_idx)
+        t_profit_t = _profit(t_spend_t, np.ones_like(t_spend_t), margin, email_cost)
+        c_profit_t = _profit(c_spend_t, np.zeros_like(c_spend_t), margin, email_cost)
+        rng = np.random.default_rng(seed)
+        diffs = bootstrap_diffs(t_profit_t, c_profit_t, rng)
+        results.append(
+            RobustRow(
+                metric="profit",
+                method="trim_pos_top_1pct",
+                arm=arm,
+                tau_hat=_diff_mean(t_profit_t, c_profit_t),
+                ci_lower=float(np.percentile(diffs, 2.5)),
+                ci_upper=float(np.percentile(diffs, 97.5)),
+                cap_value=0.0,
+                trim_threshold=trim_threshold,
+                n_capped_t=0,
+                n_capped_c=0,
+                n_trim_t=len(t_trim_idx),
+                n_trim_c=len(c_trim_idx),
+                seed=seed,
+                B=n_boot,
+                notes="sensitivity;pooled_pos_rank_trim;ties_by_id",
+            )
+        )
+        rng = np.random.default_rng(seed)
+        diffs = bootstrap_diffs(t_spend_t, c_spend_t, rng)
+        results.append(
+            RobustRow(
+                metric="spend",
+                method="trim_pos_top_1pct",
+                arm=arm,
+                tau_hat=_diff_mean(t_spend_t, c_spend_t),
+                ci_lower=float(np.percentile(diffs, 2.5)),
+                ci_upper=float(np.percentile(diffs, 97.5)),
+                cap_value=0.0,
+                trim_threshold=trim_threshold,
+                n_capped_t=0,
+                n_capped_c=0,
+                n_trim_t=len(t_trim_idx),
+                n_trim_c=len(c_trim_idx),
+                seed=seed,
+                B=n_boot,
+                notes="sensitivity;pooled_pos_rank_trim;ties_by_id",
+            )
+        )
 
-        # Trim upper tail (based on pooled positive spend threshold)
-        if pooled_trim > 0:
-            t_spend_t, t_trim = _trim_upper_by_threshold(t_spend, pooled_trim)
-            c_spend_t, c_trim = _trim_upper_by_threshold(c_spend, pooled_trim)
-        else:
-            t_spend_t, t_trim = t_spend, 0
-            c_spend_t, c_trim = c_spend, 0
-        t_profit_t = _profit_from_spend(t_spend_t, np.ones_like(t_spend_t), margin, email_cost)
-        c_profit_t = _profit_from_spend(c_spend_t, np.zeros_like(c_spend_t), margin, email_cost)
-        notes = f"sensitivity;trim_upper={trim_frac};trim_threshold_pos={pooled_trim:.4f};trim_t={t_trim};trim_c={c_trim}"
-        diffs = _bootstrap_diff(t_profit_t, c_profit_t, n_boot, seed)
-        add_result("profit_trim_upper", arm, float(t_profit_t.mean() - c_profit_t.mean()), diffs, notes)
-        diffs = _bootstrap_diff(t_spend_t, c_spend_t, n_boot, seed)
-        add_result("spend_trim_upper", arm, float(t_spend_t.mean() - c_spend_t.mean()), diffs, notes)
-
-        # log1p spend (secondary scale)
+        # log1p spend (secondary estimand)
         t_log = np.log1p(t_spend)
         c_log = np.log1p(c_spend)
-        diffs = _bootstrap_diff(t_log, c_log, n_boot, seed)
-        add_result("log1p_spend", arm, float(t_log.mean() - c_log.mean()), diffs, "secondary_scale")
+        rng = np.random.default_rng(seed)
+        diffs = bootstrap_diffs(t_log, c_log, rng)
+        results.append(
+            RobustRow(
+                metric="spend",
+                method="log1p_spend",
+                arm=arm,
+                tau_hat=_diff_mean(t_log, c_log),
+                ci_lower=float(np.percentile(diffs, 2.5)),
+                ci_upper=float(np.percentile(diffs, 97.5)),
+                cap_value=0.0,
+                trim_threshold=0.0,
+                n_capped_t=0,
+                n_capped_c=0,
+                n_trim_t=0,
+                n_trim_c=0,
+                seed=seed,
+                B=n_boot,
+                notes="secondary_scale_not_dollars",
+            )
+        )
 
-        # Top-k sensitivity (pooled within each arm)
-        for k in topk_list:
-            t_spend_k, t_removed = _topk_remove(t_spend, k)
-            c_spend_k, c_removed = _topk_remove(c_spend, k)
-            if len(t_spend_k) == 0 or len(c_spend_k) == 0:
-                continue
-            t_profit_k = _profit_from_spend(t_spend_k, np.ones_like(t_spend_k), margin, email_cost)
-            c_profit_k = _profit_from_spend(c_spend_k, np.zeros_like(c_spend_k), margin, email_cost)
-            notes = f"sensitivity;topk_removed={k};removed_t={t_removed};removed_c={c_removed}"
-            diffs = _bootstrap_diff(t_profit_k, c_profit_k, n_boot, seed)
-            add_result(f"profit_topk_{k}", arm, float(t_profit_k.mean() - c_profit_k.mean()), diffs, notes)
-            diffs = _bootstrap_diff(t_spend_k, c_spend_k, n_boot, seed)
-            add_result(f"spend_topk_{k}", arm, float(t_spend_k.mean() - c_spend_k.mean()), diffs, notes)
-
-    # If suspicious constants across multiple arms, add a global flag row
-    if any(count >= 2 for count in suspicious_flags.values()):
-        for method, count in suspicious_flags.items():
+        # Remove top by rank within each arm
+        for x in [0.001, 0.005, 0.01, 0.02]:
+            t_k = int(np.ceil(x * len(t_spend)))
+            c_k = int(np.ceil(x * len(c_spend)))
+            t_idx = _top_k_indices(t_spend, t_id, t_k)
+            c_idx = _top_k_indices(c_spend, c_id, c_k)
+            t_spend_r = _remove_indices(t_spend, t_idx)
+            c_spend_r = _remove_indices(c_spend, c_idx)
+            t_profit_r = _profit(t_spend_r, np.ones_like(t_spend_r), margin, email_cost)
+            c_profit_r = _profit(c_spend_r, np.zeros_like(c_spend_r), margin, email_cost)
+            rng = np.random.default_rng(seed)
+            diffs = bootstrap_diffs(t_profit_r, c_profit_r, rng)
             results.append(
-                RobustResult(
-                    method=method,
-                    arm="__flag__",
-                    tau_hat=float("nan"),
-                    ci_lower=float("nan"),
-                    ci_upper=float("nan"),
-                    notes=f"FLAG_CONSTANT_MINUS_COST;count={count}",
+                RobustRow(
+                    metric="profit",
+                    method=f"remove_top_by_rank_{x}",
+                    arm=arm,
+                    tau_hat=_diff_mean(t_profit_r, c_profit_r),
+                    ci_lower=float(np.percentile(diffs, 2.5)),
+                    ci_upper=float(np.percentile(diffs, 97.5)),
+                    cap_value=0.0,
+                    trim_threshold=0.0,
+                    n_capped_t=0,
+                    n_capped_c=0,
+                    n_trim_t=len(t_idx),
+                    n_trim_c=len(c_idx),
+                    seed=seed,
+                    B=n_boot,
+                    notes="rank_remove_within_arm;ties_by_id",
+                )
+            )
+            rng = np.random.default_rng(seed)
+            diffs = bootstrap_diffs(t_spend_r, c_spend_r, rng)
+            results.append(
+                RobustRow(
+                    metric="spend",
+                    method=f"remove_top_by_rank_{x}",
+                    arm=arm,
+                    tau_hat=_diff_mean(t_spend_r, c_spend_r),
+                    ci_lower=float(np.percentile(diffs, 2.5)),
+                    ci_upper=float(np.percentile(diffs, 97.5)),
+                    cap_value=0.0,
+                    trim_threshold=0.0,
+                    n_capped_t=0,
+                    n_capped_c=0,
+                    n_trim_t=len(t_idx),
+                    n_trim_c=len(c_idx),
+                    seed=seed,
+                    B=n_boot,
+                    notes="rank_remove_within_arm;ties_by_id",
                 )
             )
 

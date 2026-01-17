@@ -9,6 +9,7 @@ Decision: TODO (Ship/No-ship, selected creative)
 ## Inference policy
 - Primary (Mens vs Control, Womens vs Control): one-sided bootstrap tests for uplift; Holm FWER 0.05.
 - Exploratory (Mens vs Womens): two-sided bootstrap tests; labeled exploratory only.
+- Two-sided 95% CIs are reported for interpretability.
 
 ## Eligibility gates
 - Health checks: TODO

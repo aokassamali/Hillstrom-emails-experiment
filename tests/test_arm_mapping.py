@@ -10,3 +10,4 @@ def test_arm_mapping():
     assert normalize_arm("Mens E-Mail", arm_map) == "mens"
     assert normalize_arm("Womens E-Mail", arm_map) == "womens"
     assert normalize_arm("No E-Mail", arm_map) == "control"
+    assert normalize_arm("unknown", arm_map) is None
