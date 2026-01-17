@@ -46,7 +46,8 @@ def _canonicalize_arms(df: pd.DataFrame, arm_col: str, arm_map: Dict[str, List[s
 
 
 def _arm_sizes(df: pd.DataFrame) -> pd.DataFrame:
-    return df["arm"].value_counts().reset_index().rename(columns={"index": "arm", "arm": "count"})
+    counts = df["arm"].value_counts(dropna=False)
+    return pd.DataFrame({"arm": counts.index.astype(str), "count": counts.values})
 
 
 def _outcome_means_ci(
