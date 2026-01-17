@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 from scipy.stats import norm
 
+from bootstrap import bootstrap_ci as _bootstrap_ci
 
 def bootstrap_ci(
     treat: np.ndarray,
@@ -14,17 +15,7 @@ def bootstrap_ci(
     seed: int = 0,
     alpha: float = 0.05,
 ) -> Tuple[float, float]:
-    rng = np.random.default_rng(seed)
-    n_t = len(treat)
-    n_c = len(control)
-    diffs = np.empty(n_boot, dtype=float)
-    for i in range(n_boot):
-        t = rng.choice(treat, size=n_t, replace=True)
-        c = rng.choice(control, size=n_c, replace=True)
-        diffs[i] = t.mean() - c.mean()
-    lower = float(np.percentile(diffs, 100 * (alpha / 2)))
-    upper = float(np.percentile(diffs, 100 * (1 - alpha / 2)))
-    return lower, upper
+    return _bootstrap_ci(treat, control, n_boot, seed, stream="bootstrap_ci", alpha=alpha)
 
 
 def estimate_diff_in_means(

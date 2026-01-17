@@ -9,9 +9,10 @@ from typing import Dict, Iterable, List, Tuple
 import numpy as np
 import pandas as pd
 
+from bootstrap import baseline_stream, bootstrap_ci_from_diffs, bootstrap_diffs, bootstrap_p_one_sided
 from data import build_processed, clean_data, normalize_columns, validate_schema, validate_values, validate_no_missing
 from data_summary import write_summary
-from estimation import bootstrap_ci, estimate_diff_in_means, holm_adjust
+from estimation import estimate_diff_in_means, holm_adjust
 from experiment_checks import balance_table
 from plots import plot_arm_sizes, plot_outcome_means_ci, plot_uplift_ci, plot_influence_top_share, plot_tail_sensitivity
 from hillstrom_emails.cleaning import normalize_arm
@@ -41,6 +42,13 @@ def _bootstrap_mean_ci(values: np.ndarray, n_boot: int, seed: int, alpha: float 
     lower = float(np.percentile(means, 100 * (alpha / 2)))
     upper = float(np.percentile(means, 100 * (1 - alpha / 2)))
     return lower, upper
+
+
+def _top_k_indices(spend: np.ndarray, ids: np.ndarray, k: int) -> np.ndarray:
+    if k <= 0:
+        return np.array([], dtype=int)
+    order = np.lexsort((ids, -spend))
+    return order[:k]
 
 
 def _canonicalize_arms(df: pd.DataFrame, arm_col: str, arm_map: Dict[str, List[str]]) -> pd.DataFrame:
@@ -92,7 +100,9 @@ def _uplift_ci(
             estimate, se, ci_low, ci_high, p_value = estimate_diff_in_means(df, outcome, "arm", arm, control_arm)
             t = pd.to_numeric(df[df["arm"] == arm][outcome], errors="coerce").dropna().to_numpy()
             c = pd.to_numeric(df[df["arm"] == control_arm][outcome], errors="coerce").dropna().to_numpy()
-            boot_low, boot_high = bootstrap_ci(t, c, n_boot=n_boot, seed=seed)
+            stream = baseline_stream(outcome, arm) if outcome == "profit" else f"uplift|metric={outcome}|arm={arm}"
+            diffs = bootstrap_diffs(t, c, n_boot=n_boot, seed=seed, stream=stream)
+            boot_low, boot_high = bootstrap_ci_from_diffs(diffs)
             rows.append(
                 {
                     "outcome": outcome,
@@ -105,16 +115,6 @@ def _uplift_ci(
                 }
             )
     return pd.DataFrame(rows)
-
-
-def _bootstrap_p_one_sided(treat: np.ndarray, control: np.ndarray, n_boot: int, seed: int) -> float:
-    diffs = np.empty(n_boot, dtype=float)
-    rng = np.random.default_rng(seed)
-    for i in range(n_boot):
-        t = rng.choice(treat, size=len(treat), replace=True)
-        c = rng.choice(control, size=len(control), replace=True)
-        diffs[i] = t.mean() - c.mean()
-    return float((np.sum(diffs <= 0.0) + 1.0) / (len(diffs) + 1.0))
 
 
 def main() -> None:
@@ -227,7 +227,8 @@ def main() -> None:
             arm = row["arm"]
             t = pd.to_numeric(df[df["arm"] == arm]["profit"], errors="coerce").dropna().to_numpy()
             c = pd.to_numeric(df[df["arm"] == "control"]["profit"], errors="coerce").dropna().to_numpy()
-            p_vals.append(_bootstrap_p_one_sided(t, c, n_boot, seed))
+            diffs = bootstrap_diffs(t, c, n_boot=n_boot, seed=seed, stream=baseline_stream("profit", arm))
+            p_vals.append(bootstrap_p_one_sided(diffs))
         profit_uplift["p_value_one_sided"] = p_vals
         profit_uplift["p_value_holm"] = holm_adjust(profit_uplift["p_value_one_sided"].to_numpy())
         profit_uplift["reject_holm"] = profit_uplift["p_value_holm"] < 0.05
@@ -289,6 +290,28 @@ def main() -> None:
     main_results.to_csv(tables_dir / "main_results.csv", index=False)
 
     if health_pass:
+        # Profit model sensitivity grid
+        grid_rows = []
+        mes = float(cfg["mes"]["min_effect"])
+        treat_arms = sorted(a for a in df["arm"].unique() if a != "control")
+        for margin in [0.3, 0.4, 0.5]:
+            for cost in [0.005, 0.01, 0.02]:
+                profit = margin * df[data_cfg["spend_col"]] - cost * df["emailed"]
+                for arm in treat_arms:
+                    t_profit = profit[df["arm"] == arm]
+                    c_profit = profit[df["arm"] == "control"]
+                    tau_hat = float(t_profit.mean() - c_profit.mean())
+                    grid_rows.append(
+                        {
+                            "arm": arm,
+                            "margin": margin,
+                            "email_cost": cost,
+                            "tau_hat": tau_hat,
+                            "mes_pass": tau_hat >= mes,
+                        }
+                    )
+        pd.DataFrame(grid_rows).to_csv(tables_dir / "profit_sensitivity_grid.csv", index=False)
+
         # Robustness suite (sensitivity estimands)
         robustness = compute_robustness(
             df,
@@ -359,23 +382,46 @@ def main() -> None:
                     c_ids = c[id_col].astype(str).to_numpy()
                     t_k = int(np.ceil(x * len(t_spend)))
                     c_k = int(np.ceil(x * len(c_spend)))
-                    t_idx = np.lexsort((t_ids, -t_spend))[:t_k]
-                    c_idx = np.lexsort((c_ids, -c_spend))[:c_k]
+                    t_idx = _top_k_indices(t_spend, t_ids, t_k)
+                    c_idx = _top_k_indices(c_spend, c_ids, c_k)
                     t = t.drop(t.index[t_idx])
                     c = c.drop(c.index[c_idx])
-                t_profit = cfg["profit"]["margin"] * t[data_cfg["spend_col"]] - cfg["profit"]["email_cost"]
-                c_profit = cfg["profit"]["margin"] * c[data_cfg["spend_col"]]
-                tau = float(t_profit.mean() - c_profit.mean())
-                tail_rows.append({"arm": arm, "x_removed": x, "tau_hat": tau})
+                t_profit = cfg["profit"]["margin"] * t[data_cfg["spend_col"]] - cfg["profit"]["email_cost"] * t["emailed"]
+                c_profit = cfg["profit"]["margin"] * c[data_cfg["spend_col"]] - cfg["profit"]["email_cost"] * c["emailed"]
+                tau = float(t_profit.mean() - c_profit.mean()) if len(t_profit) and len(c_profit) else float("nan")
+                if len(t_profit) and len(c_profit):
+                    stream = f"tail_sensitivity|metric=profit|arm={arm}|x={x:.4f}"
+                    diffs = bootstrap_diffs(
+                        t_profit.to_numpy(),
+                        c_profit.to_numpy(),
+                        n_boot=n_boot,
+                        seed=seed,
+                        stream=stream,
+                    )
+                    ci_low, ci_high = bootstrap_ci_from_diffs(diffs)
+                else:
+                    ci_low, ci_high = float("nan"), float("nan")
+                tail_rows.append(
+                    {
+                        "arm": arm,
+                        "x_removed": x,
+                        "tau_hat": tau,
+                        "ci_low": ci_low,
+                        "ci_high": ci_high,
+                    }
+                )
         tail_df = pd.DataFrame(tail_rows)
-        tail_df.to_csv(tables_dir / "tail_sensitivity_profit.csv", index=False)
+        tail_df.to_csv(tables_dir / "tail_sensitivity_profit_ci.csv", index=False)
+        tail_df[["arm", "x_removed", "tau_hat"]].to_csv(tables_dir / "tail_sensitivity_profit.csv", index=False)
         plot_tail_sensitivity(tail_df, figures_dir / "tail_sensitivity_profit.png")
     else:
         pd.DataFrame().to_csv(tables_dir / "robustness.csv", index=False)
         pd.DataFrame().to_csv(tables_dir / "two_part.csv", index=False)
         pd.DataFrame().to_csv(tables_dir / "mens_vs_womens.csv", index=False)
         pd.DataFrame().to_csv(tables_dir / "influence.csv", index=False)
+        pd.DataFrame().to_csv(tables_dir / "tail_sensitivity_profit_ci.csv", index=False)
         pd.DataFrame().to_csv(tables_dir / "tail_sensitivity_profit.csv", index=False)
+        pd.DataFrame().to_csv(tables_dir / "profit_sensitivity_grid.csv", index=False)
 
     git_hash = None
     try:

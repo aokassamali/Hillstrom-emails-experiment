@@ -20,5 +20,5 @@ def test_influence_top_share_not_all_one():
         margin=0.40,
         email_cost=0.01,
     )
-    subset = out[out["x_removed"] == 0.01]
+    subset = out[(out["x_removed"] == 0.01) & (out["section"] == "top_share")]
     assert not (subset["top_share"] == 1.0).all()

@@ -6,6 +6,16 @@ import numpy as np
 import pandas as pd
 
 
+def _arm_positive_summary(df: pd.DataFrame, spend_col: str, arm_col: str) -> pd.DataFrame:
+    spend = pd.to_numeric(df[spend_col], errors="coerce").fillna(0.0)
+    grouped = df.assign(_spend=spend).groupby(arm_col)
+    summary = grouped["_spend"].agg(n="size", n_pos=lambda s: int((s > 0).sum())).reset_index()
+    summary["pct_spend_pos"] = summary.apply(
+        lambda row: float(row["n_pos"]) / float(row["n"]) if row["n"] else 0.0, axis=1
+    )
+    return summary
+
+
 def _top_k_indices(spend: np.ndarray, ids: np.ndarray, k: int) -> np.ndarray:
     if k <= 0:
         return np.array([], dtype=int)
@@ -20,14 +30,36 @@ def top_share(df: pd.DataFrame, spend_col: str, arm_col: str, id_col: str, pct: 
         ids = group[id_col].astype(str).to_numpy()
         n = len(spend)
         if n == 0:
-            rows.append({"arm": arm, "x_removed": pct, "top_share": 0.0})
+            rows.append({"arm": arm, "x_removed": pct, "top_share": 0.0, "section": "top_share"})
             continue
         k = int(np.ceil(pct * n))
         idx = _top_k_indices(spend, ids, k)
         top_sum = spend[idx].sum() if len(idx) else 0.0
         total = spend.sum()
         share = float(top_sum / total) if total > 0 else 0.0
-        rows.append({"arm": arm, "x_removed": pct, "top_share": share})
+        rows.append({"arm": arm, "x_removed": pct, "top_share": share, "section": "top_share"})
+    return pd.DataFrame(rows)
+
+
+def top_share_converters(
+    df: pd.DataFrame, spend_col: str, arm_col: str, id_col: str, pct: float
+) -> pd.DataFrame:
+    rows = []
+    for arm, group in df.groupby(arm_col):
+        spend = pd.to_numeric(group[spend_col], errors="coerce").fillna(0.0)
+        pos = spend > 0
+        spend_pos = spend[pos].to_numpy()
+        ids_pos = group.loc[pos, id_col].astype(str).to_numpy()
+        n_pos = len(spend_pos)
+        if n_pos == 0:
+            rows.append({"arm": arm, "x_removed": pct, "top_share": 0.0, "section": "top_share_converters"})
+            continue
+        k = int(np.ceil(pct * n_pos))
+        idx = _top_k_indices(spend_pos, ids_pos, k)
+        top_sum = spend_pos[idx].sum() if len(idx) else 0.0
+        total = spend_pos.sum()
+        share = float(top_sum / total) if total > 0 else 0.0
+        rows.append({"arm": arm, "x_removed": pct, "top_share": share, "section": "top_share_converters"})
     return pd.DataFrame(rows)
 
 
@@ -80,7 +112,8 @@ def uplift_after_removal(
                 "top_share": np.nan,
                 "uplift_after_removal_profit": tau_profit_trim,
                 "uplift_after_removal_spend": tau_spend_trim,
-                "notes": "rank_remove_within_arm",
+                "notes": "rank_remove_within_arm;control_trimmed",
+                "section": "uplift_after_removal",
             }
         )
     return pd.DataFrame(rows)
@@ -103,15 +136,23 @@ def build_influence_table(
         remove_pct_list = [0.001, 0.005, 0.01, 0.02]
 
     frames = []
+    summary = _arm_positive_summary(df, spend_col, arm_col)
     for pct in pct_list:
         share = top_share(df, spend_col, arm_col, id_col, pct)
         share["notes"] = "rank_top_share"
+        if np.isclose(pct, 0.01):
+            share["notes"] = "rank_top_share;top_share_1pct_can_be_1_when_pos_share_lt_1pct"
         frames.append(share)
+
+    for pct in pct_list:
+        share_conv = top_share_converters(df, spend_col, arm_col, id_col, pct)
+        share_conv["notes"] = "rank_top_share_converters"
+        frames.append(share_conv)
 
     for pct in remove_pct_list:
         uplift = uplift_after_removal(df, spend_col, arm_col, control_arm, id_col, pct, margin, email_cost)
         frames.append(uplift)
 
     out = pd.concat(frames, ignore_index=True, sort=False)
-    out = out.fillna({"top_share": 0.0})
+    out = out.merge(summary, on="arm", how="left")
     return out

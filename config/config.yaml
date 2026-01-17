@@ -4,7 +4,7 @@
 data:
   raw_dir: data/raw
   processed_path: data/processed/hillstrom_clean.csv
-  input_csv: data/raw/hillstrom.csv
+  input_csv: C:\Users\aokas\Downloads\emaildataset\Kevin_Hillstrom_MineThatData_E-MailAnalytics_DataMiningChallenge_2008.03.20.csv
   id_col: customer_id
   arm_col: segment
   arm_map:

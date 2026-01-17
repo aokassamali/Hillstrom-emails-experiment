@@ -66,7 +66,7 @@ def plot_uplift_ci(uplift: pd.DataFrame, output_dir: Path) -> None:
 def plot_influence_top_share(influence: pd.DataFrame, path: Path) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    subset = influence[influence["top_share"].notna()].copy()
+    subset = influence[influence["section"] == "top_share"].copy()
     if subset.empty:
         return
     subset["pct_label"] = (subset["x_removed"] * 100).round(2).astype(str) + "%"
@@ -85,8 +85,18 @@ def plot_tail_sensitivity(df: pd.DataFrame, path: Path) -> None:
     if df.empty:
         return
     plt.figure(figsize=(7, 4))
+    has_ci = {"ci_low", "ci_high"}.issubset(df.columns)
     for arm, group in df.groupby("arm"):
-        plt.plot(group["x_removed"], group["tau_hat"], marker="o", label=arm)
+        group = group.sort_values("x_removed")
+        x = group["x_removed"].to_numpy()
+        y = group["tau_hat"].to_numpy()
+        if has_ci:
+            lower = group["ci_low"].to_numpy()
+            upper = group["ci_high"].to_numpy()
+            yerr = [y - lower, upper - y]
+            plt.errorbar(x, y, yerr=yerr, fmt="o-", capsize=3, label=arm)
+        else:
+            plt.plot(x, y, marker="o", label=arm)
     plt.axhline(0.0, color="black", linewidth=1)
     plt.title("Profit Uplift vs Control by Tail Removal")
     plt.xlabel("Fraction removed (top spend by rank)")
