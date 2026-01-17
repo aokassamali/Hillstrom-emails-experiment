@@ -33,6 +33,8 @@ Write-TextFile "$RepoPath\.gitignore" @"
 __pycache__/
 *.pyc
 .pytest_cache/
+*.egg-info/
+uv.lock
 data/raw/*
 data/processed/*
 outputs/*
@@ -1232,6 +1234,215 @@ if __name__ == "__main__":
     main()
 "@
 
+Write-TextFile "$RepoPath\src\data.py" @"
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Iterable, List
+
+import pandas as pd
+
+REQUIRED_COLUMNS = [
+    "recency",
+    "history_segment",
+    "history",
+    "mens",
+    "womens",
+    "zip_code",
+    "newbie",
+    "channel",
+    "segment",
+    "visit",
+    "conversion",
+    "spend",
+]
+
+
+def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df.columns = [str(c).strip().lower() for c in df.columns]
+    return df
+
+
+def validate_schema(df: pd.DataFrame, required_cols: Iterable[str] = REQUIRED_COLUMNS) -> None:
+    missing = [c for c in required_cols if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing required columns: {missing}")
+
+
+def validate_values(df: pd.DataFrame) -> None:
+    issues: List[str] = []
+    for col in ["visit", "conversion", "mens", "womens", "newbie"]:
+        if col in df.columns:
+            vals = df[col].dropna()
+            bad = vals[~vals.isin([0, 1])]
+            if not bad.empty:
+                issues.append(f"{col}_not_binary")
+
+    if "spend" in df.columns and (df["spend"] < 0).any():
+        issues.append("spend_below_zero")
+
+    if "segment" in df.columns:
+        allowed = {"mens e-mail", "womens e-mail", "no e-mail"}
+        seg = df["segment"].dropna().astype(str).str.strip().str.lower()
+        if not seg.isin(allowed).all():
+            issues.append("segment_unexpected")
+
+    if issues:
+        raise ValueError(f"Validation failed: {issues}")
+
+
+def clean_data(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    if "segment" in df.columns:
+        df = df[df["segment"].notna()].copy()
+    if "spend" in df.columns:
+        df = df[df["spend"] >= 0].copy()
+        df["spend"] = df["spend"].fillna(0.0)
+    return df
+
+
+def load_raw_from_dir(raw_dir: Path) -> pd.DataFrame:
+    raw_dir = Path(raw_dir)
+    csvs = sorted(raw_dir.glob("*.csv"))
+    if len(csvs) == 0:
+        raise FileNotFoundError(f"No CSV files found in {raw_dir}")
+    if len(csvs) > 1:
+        raise ValueError(f"Multiple CSV files found in {raw_dir}: {csvs}")
+    return pd.read_csv(csvs[0])
+
+
+def write_processed(df: pd.DataFrame, processed_path: Path) -> Path:
+    processed_path = Path(processed_path)
+    processed_path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(processed_path, index=False)
+    return processed_path
+
+
+def build_processed(raw_dir: Path, processed_path: Path) -> Path:
+    df_raw = load_raw_from_dir(raw_dir)
+    df_raw = normalize_columns(df_raw)
+    validate_schema(df_raw)
+    validate_values(df_raw)
+    df_clean = clean_data(df_raw)
+    return write_processed(df_clean, processed_path)
+"@
+
+Write-TextFile "$RepoPath\src\data_summary.py" @"
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Dict, Tuple
+
+import pandas as pd
+
+
+def _pick_arm_col(df: pd.DataFrame) -> str:
+    for col in ["arm", "segment", "Segment"]:
+        if col in df.columns:
+            return col
+    raise ValueError("No arm/segment column found for summaries.")
+
+
+def summarize_schema(df: pd.DataFrame) -> pd.DataFrame:
+    return pd.DataFrame({"column": df.columns, "dtype": [str(t) for t in df.dtypes]})
+
+
+def summarize_missingness(df: pd.DataFrame) -> pd.DataFrame:
+    missing_count = df.isna().sum()
+    missing_pct = (missing_count / len(df)).fillna(0.0)
+    return pd.DataFrame(
+        {"column": missing_count.index, "missing_count": missing_count.values, "missing_pct": missing_pct.values}
+    )
+
+
+def summarize_arm_counts(df: pd.DataFrame) -> pd.DataFrame:
+    arm_col = _pick_arm_col(df)
+    arm = df[arm_col].astype(str).str.strip().str.lower()
+    counts = arm.value_counts().reset_index()
+    counts.columns = ["arm", "count"]
+    return counts
+
+
+def summarize_outcomes_by_arm(df: pd.DataFrame) -> pd.DataFrame:
+    arm_col = _pick_arm_col(df)
+    arm = df[arm_col].astype(str).str.strip().str.lower()
+    df = df.copy()
+    df["__arm__"] = arm
+
+    visit_col = "visit" if "visit" in df.columns else "Visit"
+    conversion_col = "conversion" if "conversion" in df.columns else "Conversion"
+    spend_col = "spend" if "spend" in df.columns else "Spend"
+
+    grouped = df.groupby("__arm__", dropna=False)
+    summary = grouped.agg(
+        n=("__arm__", "size"),
+        visit_rate=(visit_col, "mean"),
+        conversion_rate=(conversion_col, "mean"),
+        mean_spend=(spend_col, "mean"),
+    ).reset_index()
+    summary = summary.rename(columns={"__arm__": "arm"})
+    return summary
+
+
+def build_summary_tables(df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
+    return {
+        "schema": summarize_schema(df),
+        "missingness": summarize_missingness(df),
+        "arm_counts": summarize_arm_counts(df),
+        "outcome_summary": summarize_outcomes_by_arm(df),
+    }
+
+
+def _to_md_table(df: pd.DataFrame) -> str:
+    df = df.copy()
+    if "missing_pct" in df.columns:
+        df["missing_pct"] = df["missing_pct"].astype(float).round(4)
+    for col in ["visit_rate", "conversion_rate", "mean_spend"]:
+        if col in df.columns:
+            df[col] = df[col].astype(float).round(4)
+
+    cols = list(df.columns)
+    header = "| " + " | ".join(cols) + " |"
+    sep = "| " + " | ".join(["---"] * len(cols)) + " |"
+    rows = []
+    for _, row in df.iterrows():
+        vals = [str(row[c]) for c in cols]
+        rows.append("| " + " | ".join(vals) + " |")
+    return "\n".join([header, sep] + rows)
+
+
+def write_summary(df: pd.DataFrame, output_dir: Path) -> Tuple[Path, Path]:
+    output_dir = Path(output_dir)
+    tables_dir = output_dir / "tables"
+    tables_dir.mkdir(parents=True, exist_ok=True)
+
+    tables = build_summary_tables(df)
+    long_frames = []
+    for section, frame in tables.items():
+        temp = frame.copy()
+        temp.insert(0, "section", section)
+        long_frames.append(temp)
+    summary_long = pd.concat(long_frames, ignore_index=True, sort=False)
+    csv_path = tables_dir / "data_summary.csv"
+    summary_long.to_csv(csv_path, index=False)
+
+    md_path = output_dir / "data_summary.md"
+    with open(md_path, "w", encoding="utf-8") as f:
+        f.write("# Data Summary\n\n")
+        f.write("## Schema\n")
+        f.write(_to_md_table(tables["schema"]))
+        f.write("\n\n## Missingness\n")
+        f.write(_to_md_table(tables["missingness"]))
+        f.write("\n\n## Arm Counts\n")
+        f.write(_to_md_table(tables["arm_counts"]))
+        f.write("\n\n## Outcome Summary by Arm\n")
+        f.write(_to_md_table(tables["outcome_summary"]))
+        f.write("\n")
+
+    return csv_path, md_path
+"@
+
 Write-TextFile "$RepoPath\tests\test_stats.py" @"
 import numpy as np
 from hillstrom_emails.stats import holm_adjust
@@ -1285,6 +1496,80 @@ def test_prepare_data_exclusions():
     cleaned, report = prepare_data(df, cfg)
     assert len(cleaned) == 1
     assert report[report["metric"] == "rows_missing_arm"]["count"].iloc[0] == 1
+"@
+
+Write-TextFile "$RepoPath\tests\test_data.py" @"
+import pandas as pd
+
+from data import normalize_columns, validate_schema, validate_values
+
+
+def test_validate_schema_ok():
+    df = pd.DataFrame(
+        {
+            "recency": [1],
+            "history_segment": ["1) $0 - $100"],
+            "history": [50.0],
+            "mens": [1],
+            "womens": [0],
+            "zip_code": ["Urban"],
+            "newbie": [0],
+            "channel": ["Web"],
+            "segment": ["Mens E-Mail"],
+            "visit": [1],
+            "conversion": [0],
+            "spend": [0.0],
+        }
+    )
+    df = normalize_columns(df)
+    validate_schema(df)
+
+
+def test_validate_values_rejects_spend():
+    df = pd.DataFrame(
+        {
+            "recency": [1],
+            "history_segment": ["1) $0 - $100"],
+            "history": [50.0],
+            "mens": [1],
+            "womens": [0],
+            "zip_code": ["Urban"],
+            "newbie": [0],
+            "channel": ["Web"],
+            "segment": ["Mens E-Mail"],
+            "visit": [1],
+            "conversion": [0],
+            "spend": [-1.0],
+        }
+    )
+    df = normalize_columns(df)
+    try:
+        validate_values(df)
+        assert False, "Expected validation error"
+    except ValueError:
+        assert True
+"@
+
+Write-TextFile "$RepoPath\tests\test_data_summary.py" @"
+import pandas as pd
+
+from data_summary import build_summary_tables
+
+
+def test_build_summary_tables():
+    df = pd.DataFrame(
+        {
+            "segment": ["Mens E-Mail", "No E-Mail"],
+            "visit": [1, 0],
+            "conversion": [0, 0],
+            "spend": [0.0, 0.0],
+        }
+    )
+    tables = build_summary_tables(df)
+    assert "schema" in tables
+    assert "missingness" in tables
+    assert "arm_counts" in tables
+    assert "outcome_summary" in tables
 "@
 
 Write-TextFile "$RepoPath\data\raw\.gitkeep" ""
