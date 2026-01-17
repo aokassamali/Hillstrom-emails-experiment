@@ -10,7 +10,8 @@ function Write-TextFile {
   if ($dir -and -not (Test-Path $dir)) {
     New-Item -ItemType Directory -Force -Path $dir | Out-Null
   }
-  $Content | Set-Content -Path $Path -Encoding UTF8
+  $enc = New-Object System.Text.UTF8Encoding($false)
+  [System.IO.File]::WriteAllText($Path, $Content, $enc)
 }
 
 $dirs = @(
