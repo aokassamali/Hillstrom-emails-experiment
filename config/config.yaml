@@ -2,9 +2,11 @@
   name: Hillstrom Email Marketing Experiment
 
 data:
-  input_csv: C:\Users\aokas\Downloads\emaildataset
+  raw_dir: data/raw
+  processed_path: data/processed/hillstrom_clean.csv
+  input_csv: data/raw/hillstrom.csv
   id_col: customer_id
-  arm_col: Segment
+  arm_col: segment
   arm_map:
     control:
       - no e-mail
@@ -21,26 +23,26 @@ data:
       - womens email
       - Womens E-Mail
       - Womens Email
-  visit_col: Visit
-  conversion_col: Conversion
-  spend_col: Spend
+  visit_col: visit
+  conversion_col: conversion
+  spend_col: spend
   balance_covariates:
-    - Recency
-    - History
-    - History_Segment
-    - Mens
-    - Womens
-    - Zip_Code
-    - Newbie
-    - Channel
+    - recency
+    - history
+    - history_segment
+    - mens
+    - womens
+    - zip_code
+    - newbie
+    - channel
   adjustment_covariates:
-    - Recency
-    - History
-    - Newbie
-    - Mens
-    - Womens
-    - Channel
-    - Zip_Code
+    - recency
+    - history
+    - newbie
+    - mens
+    - womens
+    - channel
+    - zip_code
   duplicate_policy: drop_all  # drop_all or keep_first
 
 srm:
