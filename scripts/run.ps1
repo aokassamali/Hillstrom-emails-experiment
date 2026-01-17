@@ -16,4 +16,4 @@ if (-not (Test-Path .venv)) {
 
 uv pip install -e .
 uv run hillstrom-doctor
-uv run hillstrom-run --config $ConfigPath --output $OutputDir
+uv run python -m run_analysis --config $ConfigPath --output $OutputDir
