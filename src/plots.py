@@ -61,3 +61,19 @@ def plot_uplift_ci(uplift: pd.DataFrame, output_dir: Path) -> None:
         plt.tight_layout()
         plt.savefig(output_dir / f"uplift_ci_{outcome}.png", dpi=150)
         plt.close()
+
+
+def plot_influence_top_share(influence: pd.DataFrame, path: Path) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    subset = influence[influence["section"] == "top_share"].copy()
+    if subset.empty:
+        return
+    subset["pct_label"] = (subset["pct"] * 100).round(2).astype(str) + "%"
+    pivot = subset.pivot(index="arm", columns="pct_label", values="top_share")
+    pivot.plot(kind="bar", figsize=(7, 4))
+    plt.title("Top Share of Total Spend by Arm")
+    plt.ylabel("Share of total spend")
+    plt.tight_layout()
+    plt.savefig(path, dpi=150)
+    plt.close()

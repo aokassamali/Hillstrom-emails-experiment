@@ -6,6 +6,10 @@ Decision: TODO (Ship/No-ship, selected creative)
 ## Executive summary
 - TODO
 
+## Inference policy
+- Primary (Mens vs Control, Womens vs Control): one-sided bootstrap tests for uplift; Holm FWER 0.05.
+- Exploratory (Mens vs Womens): two-sided bootstrap tests; labeled exploratory only.
+
 ## Eligibility gates
 - Health checks: TODO
 - Holm-adjusted evidence: TODO
@@ -14,6 +18,9 @@ Decision: TODO (Ship/No-ship, selected creative)
 
 ## Selected arm
 - TODO
+
+## Two-part interpretation
+- TODO (conversion uplift vs spend among converters)
 
 ## Risks / limitations
 - TODO

@@ -7,6 +7,10 @@ uv.lock
 data/raw/*
 data/processed/*
 outputs/*
+reports/tables/*
+reports/figures/*
+reports/run_metadata.json
+reports/data_summary.md
 !data/raw/.gitkeep
 !data/processed/.gitkeep
 !outputs/tables/.gitkeep

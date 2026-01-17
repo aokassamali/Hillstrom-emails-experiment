@@ -1,6 +1,6 @@
 ﻿param(
   [string]$ConfigPath = "config\config.yaml",
-  [string]$OutputDir = "outputs"
+  [string]$OutputDir = "reports"
 )
 
 $ErrorActionPreference = "Stop"
@@ -17,3 +17,4 @@ if (-not (Test-Path .venv)) {
 uv pip install -e .
 uv run hillstrom-doctor
 uv run python -m run_analysis --config $ConfigPath --output $OutputDir
+

@@ -55,6 +55,13 @@ def validate_values(df: pd.DataFrame) -> None:
         raise ValueError(f"Validation failed: {issues}")
 
 
+def validate_no_missing(df: pd.DataFrame, required_cols: Iterable[str] = REQUIRED_COLUMNS) -> None:
+    missing = df[required_cols].isna().sum()
+    if missing.any():
+        bad = missing[missing > 0].to_dict()
+        raise ValueError(f"Missing values in required columns: {bad}")
+
+
 def clean_data(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     if "segment" in df.columns:
@@ -87,5 +94,6 @@ def build_processed(raw_dir: Path, processed_path: Path) -> Path:
     df_raw = normalize_columns(df_raw)
     validate_schema(df_raw)
     validate_values(df_raw)
+    validate_no_missing(df_raw)
     df_clean = clean_data(df_raw)
     return write_processed(df_clean, processed_path)

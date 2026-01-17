@@ -1,6 +1,6 @@
 import pandas as pd
 
-from data import normalize_columns, validate_schema, validate_values
+from data import normalize_columns, validate_schema, validate_values, validate_no_missing
 
 
 def test_validate_schema_ok():
@@ -47,3 +47,24 @@ def test_validate_values_rejects_spend():
         assert False, "Expected validation error"
     except ValueError:
         assert True
+
+
+def test_validate_no_missing():
+    df = pd.DataFrame(
+        {
+            "recency": [1],
+            "history_segment": ["1) $0 - $100"],
+            "history": [50.0],
+            "mens": [1],
+            "womens": [0],
+            "zip_code": ["Urban"],
+            "newbie": [0],
+            "channel": ["Web"],
+            "segment": ["Mens E-Mail"],
+            "visit": [1],
+            "conversion": [0],
+            "spend": [0.0],
+        }
+    )
+    df = normalize_columns(df)
+    validate_no_missing(df)

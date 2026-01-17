@@ -9,14 +9,18 @@ from typing import Dict, Iterable, List, Tuple
 import numpy as np
 import pandas as pd
 
-from data import build_processed, clean_data, normalize_columns, validate_schema, validate_values
+from data import build_processed, clean_data, normalize_columns, validate_schema, validate_values, validate_no_missing
 from data_summary import write_summary
 from estimation import bootstrap_ci, estimate_diff_in_means, holm_adjust
 from experiment_checks import balance_table
-from plots import plot_arm_sizes, plot_outcome_means_ci, plot_uplift_ci
+from plots import plot_arm_sizes, plot_outcome_means_ci, plot_uplift_ci, plot_influence_top_share
 from hillstrom_emails.cleaning import normalize_arm
 from hillstrom_emails.config import load_config
 from hillstrom_emails.checks import srm_check
+from robustness_suite import compute_robustness
+from two_part import summarize_two_part
+from comparisons import mens_vs_womens
+from influence import build_influence_table
 
 
 def parse_args() -> argparse.Namespace:
@@ -103,6 +107,16 @@ def _uplift_ci(
     return pd.DataFrame(rows)
 
 
+def _bootstrap_p_one_sided(treat: np.ndarray, control: np.ndarray, n_boot: int, seed: int) -> float:
+    diffs = np.empty(n_boot, dtype=float)
+    rng = np.random.default_rng(seed)
+    for i in range(n_boot):
+        t = rng.choice(treat, size=len(treat), replace=True)
+        c = rng.choice(control, size=len(control), replace=True)
+        diffs[i] = t.mean() - c.mean()
+    return float((np.sum(diffs <= 0.0) + 1.0) / (len(diffs) + 1.0))
+
+
 def main() -> None:
     args = parse_args()
     cfg = load_config(args.config)
@@ -124,6 +138,7 @@ def main() -> None:
         df = normalize_columns(df)
         validate_schema(df)
         validate_values(df)
+        validate_no_missing(df)
         df = clean_data(df)
         Path(processed_path).parent.mkdir(parents=True, exist_ok=True)
         df.to_csv(processed_path, index=False)
@@ -150,45 +165,170 @@ def main() -> None:
     outcome_means.to_csv(tables_dir / "outcome_means_ci.csv", index=False)
     plot_outcome_means_ci(outcome_means, figures_dir)
 
-    uplift = _uplift_ci(df, outcomes, "control", n_boot, seed)
-    if not uplift.empty:
-        profit_mask = uplift["outcome"] == "profit"
-        if profit_mask.any():
-            uplift.loc[profit_mask, "p_value_holm"] = holm_adjust(uplift.loc[profit_mask, "p_value"])
-        else:
-            uplift["p_value_holm"] = np.nan
-    uplift.to_csv(tables_dir / "uplift_ci.csv", index=False)
-    plot_uplift_ci(uplift, figures_dir)
-
-    guardrails = []
-    for metric, delta_pp in [
-        (data_cfg["visit_col"], cfg["guardrails"]["visit_delta_pp"]),
-        (data_cfg["conversion_col"], cfg["guardrails"]["conversion_delta_pp"]),
-    ]:
-        sub = uplift[uplift["outcome"] == metric].copy()
-        if sub.empty:
-            continue
-        for _, row in sub.iterrows():
-            ci_low_pp = row["ci_low"] * 100.0
-            ci_high_pp = row["ci_high"] * 100.0
-            guardrails.append(
-                {
-                    "arm": row["arm"],
-                    "metric": metric,
-                    "delta_hat_pp": row["estimate"] * 100.0,
-                    "ci_low_pp": ci_low_pp,
-                    "ci_high_pp": ci_high_pp,
-                    "threshold_pp": delta_pp,
-                    "pass": ci_low_pp >= float(delta_pp),
-                }
-            )
-    guardrails_df = pd.DataFrame(guardrails)
-    guardrails_df.to_csv(tables_dir / "guardrails.csv", index=False)
-
     srm = srm_check(df, cfg)
     srm["table"].to_csv(tables_dir / "srm.csv", index=False)
     balance = balance_table(df, data_cfg.get("balance_covariates", []), "arm", "control")
     balance.to_csv(tables_dir / "balance.csv", index=False)
+
+    health_pass = not bool(srm["flagged"])
+
+    uplift = pd.DataFrame()
+    guardrails_df = pd.DataFrame()
+    if health_pass:
+        uplift = _uplift_ci(df, outcomes, "control", n_boot, seed)
+        if not uplift.empty:
+            profit_mask = uplift["outcome"] == "profit"
+            if profit_mask.any():
+                uplift.loc[profit_mask, "p_value_holm"] = holm_adjust(uplift.loc[profit_mask, "p_value"])
+            else:
+                uplift["p_value_holm"] = np.nan
+        uplift.to_csv(tables_dir / "uplift_ci.csv", index=False)
+        plot_uplift_ci(uplift, figures_dir)
+
+        guardrails = []
+        for metric, delta_pp in [
+            (data_cfg["visit_col"], cfg["guardrails"]["visit_delta_pp"]),
+            (data_cfg["conversion_col"], cfg["guardrails"]["conversion_delta_pp"]),
+        ]:
+            sub = uplift[uplift["outcome"] == metric].copy()
+            if sub.empty:
+                continue
+            for _, row in sub.iterrows():
+                ci_low_pp = row["ci_low"] * 100.0
+                ci_high_pp = row["ci_high"] * 100.0
+                guardrails.append(
+                    {
+                        "arm": row["arm"],
+                        "metric": metric,
+                        "delta_hat_pp": row["estimate"] * 100.0,
+                        "ci_low_pp": ci_low_pp,
+                        "ci_high_pp": ci_high_pp,
+                        "threshold_pp": delta_pp,
+                        "pass": ci_low_pp >= float(delta_pp),
+                    }
+                )
+        guardrails_df = pd.DataFrame(guardrails)
+    guardrails_df.to_csv(tables_dir / "guardrails.csv", index=False)
+
+    # Main results: profit-only, one-sided inference, Holm, MES, guardrails, eligibility
+    profit_uplift = uplift[uplift["outcome"] == "profit"].copy() if not uplift.empty else pd.DataFrame()
+    if health_pass and not profit_uplift.empty:
+        p_vals = []
+        for _, row in profit_uplift.iterrows():
+            arm = row["arm"]
+            t = pd.to_numeric(df[df["arm"] == arm]["profit"], errors="coerce").dropna().to_numpy()
+            c = pd.to_numeric(df[df["arm"] == "control"]["profit"], errors="coerce").dropna().to_numpy()
+            p_vals.append(_bootstrap_p_one_sided(t, c, n_boot, seed))
+        profit_uplift["p_value_raw"] = p_vals
+        profit_uplift["p_value_holm"] = holm_adjust(profit_uplift["p_value_raw"].to_numpy())
+        profit_uplift["reject_holm"] = profit_uplift["p_value_holm"] < 0.05
+        mes = float(cfg["mes"]["min_effect"])
+        profit_uplift["mes_pass"] = profit_uplift["estimate"] >= mes
+        guardrail_pass = guardrails_df.pivot_table(index="arm", values="pass", aggfunc="all").reset_index()
+        guardrail_pass = guardrail_pass.rename(columns={"pass": "guardrails_pass"})
+        main_results = profit_uplift.merge(guardrail_pass, on="arm", how="left")
+        main_results["n"] = main_results["arm"].apply(lambda a: int((df["arm"] == a).sum()))
+        main_results["mean_profit"] = main_results["arm"].apply(
+            lambda a: float(pd.to_numeric(df[df["arm"] == a]["profit"], errors="coerce").mean())
+        )
+        visit_pass = guardrails_df[guardrails_df["metric"] == data_cfg["visit_col"]][["arm", "pass"]]
+        conv_pass = guardrails_df[guardrails_df["metric"] == data_cfg["conversion_col"]][["arm", "pass"]]
+        main_results = main_results.merge(
+            visit_pass.rename(columns={"pass": "guardrail_visit_pass"}), on="arm", how="left"
+        )
+        main_results = main_results.merge(
+            conv_pass.rename(columns={"pass": "guardrail_conversion_pass"}), on="arm", how="left"
+        )
+        main_results["eligible"] = (
+            main_results["reject_holm"] & main_results["mes_pass"] & main_results["guardrails_pass"]
+        )
+        selected_arm = None
+        eligible = main_results[main_results["eligible"]]
+        if not eligible.empty:
+            selected_arm = eligible.sort_values("estimate", ascending=False).iloc[0]["arm"]
+        main_results["selected"] = main_results["arm"] == selected_arm
+        main_results["note"] = "primary_one_sided;mens_vs_womens_exploratory"
+        main_results = main_results.rename(
+            columns={
+                "estimate": "tau_hat",
+                "ci_low": "ci_lower",
+                "ci_high": "ci_upper",
+            }
+        )
+        main_results = main_results[
+            [
+                "arm",
+                "n",
+                "mean_profit",
+                "tau_hat",
+                "ci_lower",
+                "ci_upper",
+                "p_value_raw",
+                "p_value_holm",
+                "reject_holm",
+                "mes_pass",
+                "guardrail_visit_pass",
+                "guardrail_conversion_pass",
+                "guardrails_pass",
+                "eligible",
+                "selected",
+                "note",
+            ]
+        ]
+    else:
+        main_results = pd.DataFrame()
+    main_results.to_csv(tables_dir / "main_results.csv", index=False)
+
+    if health_pass:
+        # Robustness suite (sensitivity estimands)
+        robustness = compute_robustness(
+            df,
+            spend_col=data_cfg["spend_col"],
+            margin=cfg["profit"]["margin"],
+            email_cost=cfg["profit"]["email_cost"],
+            n_boot=n_boot,
+            seed=seed,
+        )
+        robustness.to_csv(tables_dir / "robustness.csv", index=False)
+
+        # Two-part decomposition
+        two_part = summarize_two_part(
+            df,
+            arm_col="arm",
+            conversion_col=data_cfg["conversion_col"],
+            spend_col=data_cfg["spend_col"],
+            control_arm="control",
+            n_boot=n_boot,
+            seed=seed,
+        )
+        two_part.to_csv(tables_dir / "two_part.csv", index=False)
+
+        # Mens vs Womens direct comparison
+        rows = []
+        for outcome in ["profit", data_cfg["spend_col"]]:
+            est, ci_low, ci_high, p_value = mens_vs_womens(df, outcome, "arm", n_boot, seed)
+            rows.append(
+                {
+                    "outcome": outcome,
+                    "estimate": est,
+                    "ci_lower": ci_low,
+                    "ci_upper": ci_high,
+                    "p_value_two_sided": p_value,
+                    "notes": "exploratory_two_sided",
+                }
+            )
+        mens_womens = pd.DataFrame(rows)
+        mens_womens.to_csv(tables_dir / "mens_vs_womens.csv", index=False)
+
+        # Influence diagnostics
+        influence = build_influence_table(df, data_cfg["spend_col"], "arm", "control")
+        influence.to_csv(tables_dir / "influence.csv", index=False)
+        plot_influence_top_share(influence, figures_dir / "influence_top_share.png")
+    else:
+        pd.DataFrame().to_csv(tables_dir / "robustness.csv", index=False)
+        pd.DataFrame().to_csv(tables_dir / "two_part.csv", index=False)
+        pd.DataFrame().to_csv(tables_dir / "mens_vs_womens.csv", index=False)
+        pd.DataFrame().to_csv(tables_dir / "influence.csv", index=False)
 
     metadata = {
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
@@ -196,6 +336,14 @@ def main() -> None:
         "rows_clean": int(len(df)),
         "health": {
             "srm_flagged": bool(srm["flagged"]),
+            "health_pass": bool(health_pass),
+        },
+        "inference": {
+            "primary": "one_sided_bootstrap",
+            "exploratory": "two_sided_bootstrap",
+        },
+        "srm": {
+            "expected_allocation": cfg["srm"].get("expected_allocation"),
         },
     }
     with open(output_dir / "run_metadata.json", "w", encoding="utf-8") as f:

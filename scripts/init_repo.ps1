@@ -37,11 +37,12 @@ __pycache__/
 uv.lock
 data/raw/*
 data/processed/*
-outputs/*
+reports/tables/*
+reports/figures/*
+reports/run_metadata.json
+reports/data_summary.md
 !data/raw/.gitkeep
 !data/processed/.gitkeep
-!outputs/tables/.gitkeep
-!outputs/figures/.gitkeep
 "@
 
 Write-TextFile "$RepoPath\pyproject.toml" @"
@@ -92,7 +93,7 @@ Research-grade analysis pipeline for the Hillstrom email marketing experiment (M
 - notebooks/: exploration (kept separate from pipeline)
 - reports/: experiment spec, analysis plan, decision memo
 - data/: raw and processed data
-- outputs/: tables, figures, run metadata
+- reports/: tables, figures, run metadata
 
 ## Setup
 1) Ensure `uv` is installed and available on PATH.
@@ -100,11 +101,11 @@ Research-grade analysis pipeline for the Hillstrom email marketing experiment (M
 
 ## Run pipeline
 ```powershell
-scripts\run.ps1 -ConfigPath config\config.yaml -OutputDir outputs
+scripts\run.ps1 -ConfigPath config\config.yaml -OutputDir reports
 ```
 
 ## Results table headings (exact)
-Main results table (`outputs/tables/main_results.csv`):
+Main results table (`reports/tables/main_results.csv`):
 - arm
 - n
 - mean_profit
@@ -121,7 +122,7 @@ Main results table (`outputs/tables/main_results.csv`):
 - eligible
 - selected
 
-Guardrails table (`outputs/tables/guardrails.csv`):
+Guardrails table (`reports/tables/guardrails.csv`):
 - arm
 - metric
 - delta_hat_pp
@@ -130,19 +131,19 @@ Guardrails table (`outputs/tables/guardrails.csv`):
 - threshold_pp
 - pass
 
-Robustness grid (`outputs/tables/robustness.csv`):
+Robustness grid (`reports/tables/robustness.csv`):
 - method
 - arm
 - tau_hat
 
-Balance table (`outputs/tables/balance.csv`):
+Balance table (`reports/tables/balance.csv`):
 - covariate
 - arm
 - smd
 - abs_smd
 - flag
 
-SRM table (`outputs/tables/srm.csv`):
+SRM table (`reports/tables/srm.csv`):
 - arm
 - observed
 - expected
@@ -151,11 +152,11 @@ SRM table (`outputs/tables/srm.csv`):
 - p_value
 - flagged
 
-Cleaning report (`outputs/tables/cleaning.csv`):
+Cleaning report (`reports/tables/cleaning.csv`):
 - metric
 - count
 
-Adjusted ATE table (`outputs/tables/adjusted_ate.csv`):
+Adjusted ATE table (`reports/tables/adjusted_ate.csv`):
 - arm
 - coef
 - p_value_one_sided
@@ -233,7 +234,7 @@ guardrails:
 Write-TextFile "$RepoPath\scripts\run.ps1" @"
 param(
   [string]`$ConfigPath = "config\config.yaml",
-  [string]`$OutputDir = "outputs"
+  [string]`$OutputDir = "reports"
 )
 
 `$ErrorActionPreference = "Stop"
@@ -1997,7 +1998,7 @@ def test_prepare_data_exclusions():
 Write-TextFile "$RepoPath\tests\test_data.py" @"
 import pandas as pd
 
-from data import normalize_columns, validate_schema, validate_values
+from data import normalize_columns, validate_schema, validate_values, validate_no_missing
 
 
 def test_validate_schema_ok():
@@ -2044,6 +2045,27 @@ def test_validate_values_rejects_spend():
         assert False, "Expected validation error"
     except ValueError:
         assert True
+
+
+def test_validate_no_missing():
+    df = pd.DataFrame(
+        {
+            "recency": [1],
+            "history_segment": ["1) $0 - $100"],
+            "history": [50.0],
+            "mens": [1],
+            "womens": [0],
+            "zip_code": ["Urban"],
+            "newbie": [0],
+            "channel": ["Web"],
+            "segment": ["Mens E-Mail"],
+            "visit": [1],
+            "conversion": [0],
+            "spend": [0.0],
+        }
+    )
+    df = normalize_columns(df)
+    validate_no_missing(df)
 "@
 
 Write-TextFile "$RepoPath\tests\test_data_summary.py" @"
@@ -2150,6 +2172,76 @@ def test_summarize_outcomes():
     assert set(summary["arm"]) == {"treat"}
 "@
 
+Write-TextFile "$RepoPath\tests\test_robustness_suite.py" @"
+import pandas as pd
+
+from robustness_suite import compute_robustness
+
+
+def test_robustness_not_constant_minus_cost():
+    df = pd.DataFrame(
+        {
+            "arm": ["control"] * 5 + ["mens"] * 5 + ["womens"] * 5,
+            "spend": [0, 0, 0, 0, 0, 10, 12, 8, 9, 11, 20, 22, 18, 19, 21],
+        }
+    )
+    out = compute_robustness(
+        df,
+        spend_col="spend",
+        margin=0.40,
+        email_cost=0.01,
+        n_boot=200,
+        seed=1,
+    )
+    flagged = out["notes"].fillna("").str.contains("FLAG_CONSTANT_MINUS_COST").any()
+    assert not flagged
+"@
+
+Write-TextFile "$RepoPath\tests\test_two_part.py" @"
+import pandas as pd
+
+from two_part import summarize_two_part
+
+
+def test_two_part_contains_converter_distribution():
+    df = pd.DataFrame(
+        {
+            "arm": ["control", "control", "mens", "mens"],
+            "conversion": [1, 0, 1, 0],
+            "spend": [10.0, 0.0, 12.0, 0.0],
+        }
+    )
+    out = summarize_two_part(df, "arm", "conversion", "spend", "control", n_boot=200, seed=1)
+    assert (out["section"] == "converter_distribution").any()
+"@
+
+Write-TextFile "$RepoPath\tests\test_config_defaults.py" @"
+from hillstrom_emails.config import load_config
+
+
+def test_srm_expected_allocation_default():
+    cfg = load_config("config/config.yaml")
+    expected = cfg["srm"].get("expected_allocation", {})
+    assert round(expected.get("control", 0), 6) == round(1 / 3, 6)
+    assert round(expected.get("mens", 0), 6) == round(1 / 3, 6)
+    assert round(expected.get("womens", 0), 6) == round(1 / 3, 6)
+"@
+
+Write-TextFile "$RepoPath\tests\test_arm_mapping.py" @"
+from hillstrom_emails.cleaning import normalize_arm
+
+
+def test_arm_mapping():
+    arm_map = {
+        "control": ["No E-Mail"],
+        "mens": ["Mens E-Mail"],
+        "womens": ["Womens E-Mail"],
+    }
+    assert normalize_arm("Mens E-Mail", arm_map) == "mens"
+    assert normalize_arm("Womens E-Mail", arm_map) == "womens"
+    assert normalize_arm("No E-Mail", arm_map) == "control"
+"@
+
 Write-TextFile "$RepoPath\tests\test_plots.py" @"
 from pathlib import Path
 import tempfile
@@ -2188,7 +2280,955 @@ def test_plots_write_files():
             }
         )
         plot_uplift_ci(uplift, tmp)
-        assert (tmp / "uplift_ci_profit.png").exists()
+    assert (tmp / "uplift_ci_profit.png").exists()
+"@
+
+Write-TextFile "$RepoPath\src\data.py" @"
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Iterable, List
+
+import pandas as pd
+
+REQUIRED_COLUMNS = [
+    "recency",
+    "history_segment",
+    "history",
+    "mens",
+    "womens",
+    "zip_code",
+    "newbie",
+    "channel",
+    "segment",
+    "visit",
+    "conversion",
+    "spend",
+]
+
+
+def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df.columns = [str(c).strip().lower() for c in df.columns]
+    return df
+
+
+def validate_schema(df: pd.DataFrame, required_cols: Iterable[str] = REQUIRED_COLUMNS) -> None:
+    missing = [c for c in required_cols if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing required columns: {missing}")
+
+
+def validate_values(df: pd.DataFrame) -> None:
+    issues: List[str] = []
+    for col in ["visit", "conversion", "mens", "womens", "newbie"]:
+        if col in df.columns:
+            vals = df[col].dropna()
+            bad = vals[~vals.isin([0, 1])]
+            if not bad.empty:
+                issues.append(f"{col}_not_binary")
+
+    if "spend" in df.columns and (df["spend"] < 0).any():
+        issues.append("spend_below_zero")
+
+    if "segment" in df.columns:
+        allowed = {"mens e-mail", "womens e-mail", "no e-mail"}
+        seg = df["segment"].dropna().astype(str).str.strip().str.lower()
+        if not seg.isin(allowed).all():
+            issues.append("segment_unexpected")
+
+    if issues:
+        raise ValueError(f"Validation failed: {issues}")
+
+
+def validate_no_missing(df: pd.DataFrame, required_cols: Iterable[str] = REQUIRED_COLUMNS) -> None:
+    missing = df[required_cols].isna().sum()
+    if missing.any():
+        bad = missing[missing > 0].to_dict()
+        raise ValueError(f"Missing values in required columns: {bad}")
+
+
+def clean_data(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    if "segment" in df.columns:
+        df = df[df["segment"].notna()].copy()
+    if "spend" in df.columns:
+        df = df[df["spend"] >= 0].copy()
+        df["spend"] = df["spend"].fillna(0.0)
+    return df
+
+
+def load_raw_from_dir(raw_dir: Path) -> pd.DataFrame:
+    raw_dir = Path(raw_dir)
+    csvs = sorted(raw_dir.glob("*.csv"))
+    if len(csvs) == 0:
+        raise FileNotFoundError(f"No CSV files found in {raw_dir}")
+    if len(csvs) > 1:
+        raise ValueError(f"Multiple CSV files found in {raw_dir}: {csvs}")
+    return pd.read_csv(csvs[0])
+
+
+def write_processed(df: pd.DataFrame, processed_path: Path) -> Path:
+    processed_path = Path(processed_path)
+    processed_path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(processed_path, index=False)
+    return processed_path
+
+
+def build_processed(raw_dir: Path, processed_path: Path) -> Path:
+    df_raw = load_raw_from_dir(raw_dir)
+    df_raw = normalize_columns(df_raw)
+    validate_schema(df_raw)
+    validate_values(df_raw)
+    validate_no_missing(df_raw)
+    df_clean = clean_data(df_raw)
+    return write_processed(df_clean, processed_path)
+"@
+
+Write-TextFile "$RepoPath\src\robustness_suite.py" @"
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Dict, List, Tuple
+
+import numpy as np
+import pandas as pd
+
+
+@dataclass
+class RobustResult:
+    method: str
+    arm: str
+    tau_hat: float
+    ci_lower: float
+    ci_upper: float
+    notes: str
+
+
+def _bootstrap_diff(
+    treat: np.ndarray,
+    control: np.ndarray,
+    n_boot: int,
+    seed: int,
+) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    n_t = len(treat)
+    n_c = len(control)
+    diffs = np.empty(n_boot, dtype=float)
+    for i in range(n_boot):
+        t = rng.choice(treat, size=n_t, replace=True)
+        c = rng.choice(control, size=n_c, replace=True)
+        diffs[i] = t.mean() - c.mean()
+    return diffs
+
+
+def _ci_from_boot(diffs: np.ndarray, alpha: float = 0.05) -> Tuple[float, float]:
+    return (
+        float(np.percentile(diffs, 100 * (alpha / 2))),
+        float(np.percentile(diffs, 100 * (1 - alpha / 2))),
+    )
+
+
+def _profit_from_spend(spend: np.ndarray, emailed: np.ndarray, margin: float, email_cost: float) -> np.ndarray:
+    return margin * spend - email_cost * emailed
+
+
+def _winsorize_upper(values: np.ndarray, cap: float) -> Tuple[np.ndarray, int]:
+    capped = np.minimum(values, cap)
+    return capped, int(np.sum(values > cap))
+
+
+def _trim_upper(values: np.ndarray, trim_frac: float) -> Tuple[np.ndarray, int]:
+    if trim_frac <= 0:
+        return values, 0
+    n = len(values)
+    k = int(np.floor(n * trim_frac))
+    if k <= 0:
+        return values, 0
+    threshold = np.partition(values, -k)[-k]
+    trimmed = values[values <= threshold]
+    return trimmed, int(n - len(trimmed))
+
+
+def _topk_remove(values: np.ndarray, k: int) -> Tuple[np.ndarray, int]:
+    if k <= 0:
+        return values, 0
+    if k >= len(values):
+        return np.array([], dtype=float), len(values)
+    threshold = np.partition(values, -k)[-k]
+    kept = values[values < threshold]
+    removed = len(values) - len(kept)
+    return kept, removed
+
+
+def compute_robustness(
+    df: pd.DataFrame,
+    spend_col: str,
+    margin: float,
+    email_cost: float,
+    n_boot: int,
+    seed: int,
+    trim_frac: float = 0.01,
+    topk_list: List[int] | None = None,
+) -> pd.DataFrame:
+    if topk_list is None:
+        topk_list = [10, 50]
+
+    df = df.copy()
+    df["emailed"] = df["arm"].isin(["mens", "womens"]).astype(int)
+    spend = pd.to_numeric(df[spend_col], errors="coerce").fillna(0.0).to_numpy()
+    pooled_p99 = float(np.quantile(spend, 0.99))
+
+    results: List[RobustResult] = []
+    suspicious_flags: Dict[str, int] = {}
+
+    def add_result(method: str, arm: str, tau_hat: float, diffs: np.ndarray, notes: str) -> None:
+        ci_low, ci_high = _ci_from_boot(diffs)
+        if abs(tau_hat + email_cost) < 1e-12 and method.startswith(("profit_winsor", "profit_trim")):
+            suspicious_flags[method] = suspicious_flags.get(method, 0) + 1
+            notes = (notes + ";FLAG_CONSTANT_MINUS_COST").strip(";")
+        results.append(
+            RobustResult(method=method, arm=arm, tau_hat=float(tau_hat), ci_lower=ci_low, ci_upper=ci_high, notes=notes)
+        )
+
+    for arm in ["mens", "womens"]:
+        treat = df[df["arm"] == arm]
+        control = df[df["arm"] == "control"]
+
+        t_spend = pd.to_numeric(treat[spend_col], errors="coerce").fillna(0.0).to_numpy()
+        c_spend = pd.to_numeric(control[spend_col], errors="coerce").fillna(0.0).to_numpy()
+        t_email = treat["emailed"].to_numpy()
+        c_email = control["emailed"].to_numpy()
+
+        t_profit = _profit_from_spend(t_spend, t_email, margin, email_cost)
+        c_profit = _profit_from_spend(c_spend, c_email, margin, email_cost)
+        diffs = _bootstrap_diff(t_profit, c_profit, n_boot, seed)
+        add_result("profit_baseline", arm, float(t_profit.mean() - c_profit.mean()), diffs, "primary_ate")
+
+        diffs = _bootstrap_diff(t_spend, c_spend, n_boot, seed)
+        add_result("spend_baseline", arm, float(t_spend.mean() - c_spend.mean()), diffs, "primary_ate")
+
+        t_spend_w, t_cap = _winsorize_upper(t_spend, pooled_p99)
+        c_spend_w, c_cap = _winsorize_upper(c_spend, pooled_p99)
+        t_profit_w = _profit_from_spend(t_spend_w, t_email, margin, email_cost)
+        c_profit_w = _profit_from_spend(c_spend_w, c_email, margin, email_cost)
+        notes = f"sensitivity;cap_p99={pooled_p99:.4f};capped_t={t_cap};capped_c={c_cap}"
+        diffs = _bootstrap_diff(t_profit_w, c_profit_w, n_boot, seed)
+        add_result("profit_winsor_p99", arm, float(t_profit_w.mean() - c_profit_w.mean()), diffs, notes)
+        diffs = _bootstrap_diff(t_spend_w, c_spend_w, n_boot, seed)
+        add_result("spend_winsor_p99", arm, float(t_spend_w.mean() - c_spend_w.mean()), diffs, notes)
+
+        t_spend_t, t_trim = _trim_upper(t_spend, trim_frac)
+        c_spend_t, c_trim = _trim_upper(c_spend, trim_frac)
+        t_profit_t = _profit_from_spend(t_spend_t, np.ones_like(t_spend_t), margin, email_cost)
+        c_profit_t = _profit_from_spend(c_spend_t, np.zeros_like(c_spend_t), margin, email_cost)
+        notes = f"sensitivity;trim_upper={trim_frac};trim_t={t_trim};trim_c={c_trim}"
+        diffs = _bootstrap_diff(t_profit_t, c_profit_t, n_boot, seed)
+        add_result("profit_trim_upper", arm, float(t_profit_t.mean() - c_profit_t.mean()), diffs, notes)
+        diffs = _bootstrap_diff(t_spend_t, c_spend_t, n_boot, seed)
+        add_result("spend_trim_upper", arm, float(t_spend_t.mean() - c_spend_t.mean()), diffs, notes)
+
+        t_log = np.log1p(t_spend)
+        c_log = np.log1p(c_spend)
+        diffs = _bootstrap_diff(t_log, c_log, n_boot, seed)
+        add_result("log1p_spend", arm, float(t_log.mean() - c_log.mean()), diffs, "secondary_scale")
+
+        for k in topk_list:
+            t_spend_k, t_removed = _topk_remove(t_spend, k)
+            c_spend_k, c_removed = _topk_remove(c_spend, k)
+            if len(t_spend_k) == 0 or len(c_spend_k) == 0:
+                continue
+            t_profit_k = _profit_from_spend(t_spend_k, np.ones_like(t_spend_k), margin, email_cost)
+            c_profit_k = _profit_from_spend(c_spend_k, np.zeros_like(c_spend_k), margin, email_cost)
+            notes = f"sensitivity;topk_removed={k};removed_t={t_removed};removed_c={c_removed}"
+            diffs = _bootstrap_diff(t_profit_k, c_profit_k, n_boot, seed)
+            add_result(f"profit_topk_{k}", arm, float(t_profit_k.mean() - c_profit_k.mean()), diffs, notes)
+            diffs = _bootstrap_diff(t_spend_k, c_spend_k, n_boot, seed)
+            add_result(f"spend_topk_{k}", arm, float(t_spend_k.mean() - c_spend_k.mean()), diffs, notes)
+
+    if any(count >= 2 for count in suspicious_flags.values()):
+        for method, count in suspicious_flags.items():
+            results.append(
+                RobustResult(
+                    method=method,
+                    arm="__flag__",
+                    tau_hat=float("nan"),
+                    ci_lower=float("nan"),
+                    ci_upper=float("nan"),
+                    notes=f"FLAG_CONSTANT_MINUS_COST;count={count}",
+                )
+            )
+
+    return pd.DataFrame([r.__dict__ for r in results])
+"@
+
+Write-TextFile "$RepoPath\src\two_part.py" @"
+from __future__ import annotations
+
+from typing import List, Tuple
+
+import numpy as np
+import pandas as pd
+
+
+def _bootstrap_diff(
+    treat: np.ndarray,
+    control: np.ndarray,
+    n_boot: int,
+    seed: int,
+) -> Tuple[float, float]:
+    rng = np.random.default_rng(seed)
+    n_t = len(treat)
+    n_c = len(control)
+    diffs = np.empty(n_boot, dtype=float)
+    for i in range(n_boot):
+        t = rng.choice(treat, size=n_t, replace=True)
+        c = rng.choice(control, size=n_c, replace=True)
+        diffs[i] = t.mean() - c.mean()
+    return float(np.percentile(diffs, 2.5)), float(np.percentile(diffs, 97.5))
+
+
+def summarize_two_part(
+    df: pd.DataFrame,
+    arm_col: str,
+    conversion_col: str,
+    spend_col: str,
+    control_arm: str,
+    n_boot: int,
+    seed: int,
+) -> pd.DataFrame:
+    rows: List[dict] = []
+    arms = sorted(a for a in df[arm_col].unique() if a != control_arm)
+    all_arms = [control_arm] + arms
+
+    for arm in all_arms:
+        group = df[df[arm_col] == arm]
+        spend = pd.to_numeric(group.loc[group[conversion_col] == 1, spend_col], errors="coerce").dropna().to_numpy()
+        if len(spend) == 0:
+            median, iqr, p90, p99 = (np.nan, np.nan, np.nan, np.nan)
+        else:
+            q1, q3 = np.quantile(spend, [0.25, 0.75])
+            median = float(np.median(spend))
+            iqr = float(q3 - q1)
+            p90 = float(np.quantile(spend, 0.90))
+            p99 = float(np.quantile(spend, 0.99))
+        rows.append(
+            {
+                "section": "converter_distribution",
+                "arm": arm,
+                "estimate": np.nan,
+                "ci_lower": np.nan,
+                "ci_upper": np.nan,
+                "n_converters": int(len(spend)),
+                "median": median,
+                "iqr": iqr,
+                "p90": p90,
+                "p99": p99,
+                "notes": "descriptive_only",
+            }
+        )
+
+    for arm in arms:
+        treat = df[df[arm_col] == arm]
+        control = df[df[arm_col] == control_arm]
+
+        t_conv = pd.to_numeric(treat[conversion_col], errors="coerce").dropna().to_numpy()
+        c_conv = pd.to_numeric(control[conversion_col], errors="coerce").dropna().to_numpy()
+        conv_uplift = t_conv.mean() - c_conv.mean()
+        ci_low, ci_high = _bootstrap_diff(t_conv, c_conv, n_boot, seed)
+        rows.append(
+            {
+                "section": "conversion_uplift",
+                "arm": arm,
+                "estimate": float(conv_uplift),
+                "ci_lower": ci_low,
+                "ci_upper": ci_high,
+                "n_converters": int(t_conv.sum()),
+                "median": np.nan,
+                "iqr": np.nan,
+                "p90": np.nan,
+                "p99": np.nan,
+                "notes": "diff_in_proportions",
+            }
+        )
+
+        t_spend = pd.to_numeric(treat.loc[treat[conversion_col] == 1, spend_col], errors="coerce").dropna().to_numpy()
+        c_spend = pd.to_numeric(control.loc[control[conversion_col] == 1, spend_col], errors="coerce").dropna().to_numpy()
+        if len(t_spend) == 0 or len(c_spend) == 0:
+            spend_uplift = np.nan
+            ci_low, ci_high = np.nan, np.nan
+        else:
+            spend_uplift = t_spend.mean() - c_spend.mean()
+            ci_low, ci_high = _bootstrap_diff(t_spend, c_spend, n_boot, seed)
+
+        if len(t_spend) == 0:
+            median, iqr, p90, p99 = (np.nan, np.nan, np.nan, np.nan)
+        else:
+            q1, q3 = np.quantile(t_spend, [0.25, 0.75])
+            median = float(np.median(t_spend))
+            iqr = float(q3 - q1)
+            p90 = float(np.quantile(t_spend, 0.90))
+            p99 = float(np.quantile(t_spend, 0.99))
+        rows.append(
+            {
+                "section": "spend_among_converters",
+                "arm": arm,
+                "estimate": float(spend_uplift) if spend_uplift == spend_uplift else np.nan,
+                "ci_lower": ci_low,
+                "ci_upper": ci_high,
+                "n_converters": int(len(t_spend)),
+                "median": median,
+                "iqr": iqr,
+                "p90": p90,
+                "p99": p99,
+                "notes": "conditional_on_conversion",
+            }
+        )
+
+    return pd.DataFrame(rows)
+"@
+
+Write-TextFile "$RepoPath\src\comparisons.py" @"
+from __future__ import annotations
+
+from typing import Tuple
+
+import numpy as np
+import pandas as pd
+
+
+def mens_vs_womens(
+    df: pd.DataFrame,
+    outcome: str,
+    arm_col: str = "arm",
+    n_boot: int = 10000,
+    seed: int = 0,
+) -> Tuple[float, float, float, float]:
+    mens = pd.to_numeric(df[df[arm_col] == "mens"][outcome], errors="coerce").dropna().to_numpy()
+    womens = pd.to_numeric(df[df[arm_col] == "womens"][outcome], errors="coerce").dropna().to_numpy()
+    if len(mens) == 0 or len(womens) == 0:
+        raise ValueError("Mens or Womens arm has no valid values.")
+    estimate = float(mens.mean() - womens.mean())
+    rng = np.random.default_rng(seed)
+    diffs = np.empty(n_boot, dtype=float)
+    for i in range(n_boot):
+        m = rng.choice(mens, size=len(mens), replace=True)
+        w = rng.choice(womens, size=len(womens), replace=True)
+        diffs[i] = m.mean() - w.mean()
+    ci_low = float(np.percentile(diffs, 2.5))
+    ci_high = float(np.percentile(diffs, 97.5))
+    p_value = float((np.sum(np.abs(diffs) >= abs(estimate)) + 1.0) / (len(diffs) + 1.0))
+    return estimate, ci_low, ci_high, p_value
+"@
+
+Write-TextFile "$RepoPath\src\influence.py" @"
+from __future__ import annotations
+
+from typing import List
+
+import numpy as np
+import pandas as pd
+
+
+def top_share(df: pd.DataFrame, spend_col: str, arm_col: str, pct: float) -> pd.DataFrame:
+    rows = []
+    for arm, group in df.groupby(arm_col):
+        values = pd.to_numeric(group[spend_col], errors="coerce").dropna().to_numpy()
+        if len(values) == 0:
+            rows.append({"arm": arm, "pct": pct, "top_share": np.nan})
+            continue
+        cutoff = np.quantile(values, 1 - pct)
+        top_sum = values[values >= cutoff].sum()
+        total = values.sum()
+        share = float(top_sum / total) if total > 0 else np.nan
+        rows.append({"arm": arm, "pct": pct, "top_share": share})
+    return pd.DataFrame(rows)
+
+
+def uplift_after_removal(
+    df: pd.DataFrame,
+    spend_col: str,
+    arm_col: str,
+    control_arm: str,
+    remove_pct: float,
+) -> pd.DataFrame:
+    rows = []
+    arms = sorted(a for a in df[arm_col].unique() if a != control_arm)
+    pooled = pd.to_numeric(df[spend_col], errors="coerce").dropna().to_numpy()
+    if len(pooled) == 0:
+        return pd.DataFrame(columns=["arm", "remove_pct", "tau_hat", "tau_hat_removed", "fraction_attributable"])
+    cutoff = np.quantile(pooled, 1 - remove_pct)
+    df_trim = df.copy()
+    df_trim = df_trim[df_trim[spend_col] < cutoff].copy()
+
+    for arm in arms:
+        t = pd.to_numeric(df[df[arm_col] == arm][spend_col], errors="coerce").dropna().to_numpy()
+        c = pd.to_numeric(df[df[arm_col] == control_arm][spend_col], errors="coerce").dropna().to_numpy()
+        t_trim = pd.to_numeric(df_trim[df_trim[arm_col] == arm][spend_col], errors="coerce").dropna().to_numpy()
+        c_trim = pd.to_numeric(df_trim[df_trim[arm_col] == control_arm][spend_col], errors="coerce").dropna().to_numpy()
+
+        tau_hat = float(t.mean() - c.mean()) if len(t) and len(c) else np.nan
+        tau_hat_trim = float(t_trim.mean() - c_trim.mean()) if len(t_trim) and len(c_trim) else np.nan
+        frac = np.nan
+        if tau_hat not in [0.0, np.nan] and tau_hat_trim == tau_hat_trim:
+            if tau_hat != 0:
+                frac = float((tau_hat - tau_hat_trim) / tau_hat)
+        rows.append(
+            {
+                "arm": arm,
+                "remove_pct": remove_pct,
+                "tau_hat": tau_hat,
+                "tau_hat_removed": tau_hat_trim,
+                "fraction_attributable": frac,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def build_influence_table(
+    df: pd.DataFrame,
+    spend_col: str,
+    arm_col: str,
+    control_arm: str,
+    pct_list: List[float] | None = None,
+    remove_pct_list: List[float] | None = None,
+) -> pd.DataFrame:
+    if pct_list is None:
+        pct_list = [0.001, 0.01]
+    if remove_pct_list is None:
+        remove_pct_list = [0.001, 0.01]
+
+    frames = []
+    for pct in pct_list:
+        share = top_share(df, spend_col, arm_col, pct)
+        share["section"] = "top_share"
+        frames.append(share)
+
+    for pct in remove_pct_list:
+        uplift = uplift_after_removal(df, spend_col, arm_col, control_arm, pct)
+        uplift["section"] = "uplift_after_removal"
+        frames.append(uplift)
+
+    return pd.concat(frames, ignore_index=True, sort=False)
+"@
+
+Write-TextFile "$RepoPath\src\plots.py" @"
+from __future__ import annotations
+
+from pathlib import Path
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import pandas as pd
+
+
+def plot_arm_sizes(arm_sizes: pd.DataFrame, path: Path) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if arm_sizes.empty:
+        return
+    plt.figure(figsize=(6, 4))
+    plt.bar(arm_sizes["arm"], arm_sizes["count"])
+    plt.title("Arm Sizes")
+    plt.ylabel("Count")
+    plt.tight_layout()
+    plt.savefig(path, dpi=150)
+    plt.close()
+
+
+def plot_outcome_means_ci(outcome_means: pd.DataFrame, output_dir: Path) -> None:
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    if outcome_means.empty:
+        return
+    for outcome in outcome_means["outcome"].unique():
+        subset = outcome_means[outcome_means["outcome"] == outcome]
+        plt.figure(figsize=(6, 4))
+        y = subset["mean"].to_numpy()
+        lower = subset["ci_low"].to_numpy()
+        upper = subset["ci_high"].to_numpy()
+        yerr = [y - lower, upper - y]
+        plt.errorbar(subset["arm"], y, yerr=yerr, fmt="o", capsize=4)
+        plt.title(f"{outcome} Mean by Arm")
+        plt.ylabel(outcome)
+        plt.tight_layout()
+        plt.savefig(output_dir / f"mean_ci_{outcome}.png", dpi=150)
+        plt.close()
+
+
+def plot_uplift_ci(uplift: pd.DataFrame, output_dir: Path) -> None:
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    if uplift.empty:
+        return
+    for outcome in uplift["outcome"].unique():
+        subset = uplift[uplift["outcome"] == outcome]
+        plt.figure(figsize=(6, 4))
+        y = subset["estimate"].to_numpy()
+        lower = subset["ci_low"].to_numpy()
+        upper = subset["ci_high"].to_numpy()
+        yerr = [y - lower, upper - y]
+        plt.errorbar(subset["arm"], y, yerr=yerr, fmt="o", capsize=4)
+        plt.axhline(0.0, color="black", linewidth=1)
+        plt.title(f"{outcome} Uplift vs Control")
+        plt.ylabel("Difference")
+        plt.tight_layout()
+        plt.savefig(output_dir / f"uplift_ci_{outcome}.png", dpi=150)
+        plt.close()
+
+
+def plot_influence_top_share(influence: pd.DataFrame, path: Path) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    subset = influence[influence["section"] == "top_share"].copy()
+    if subset.empty:
+        return
+    subset["pct_label"] = (subset["pct"] * 100).round(2).astype(str) + "%"
+    pivot = subset.pivot(index="arm", columns="pct_label", values="top_share")
+    pivot.plot(kind="bar", figsize=(7, 4))
+    plt.title("Top Share of Total Spend by Arm")
+    plt.ylabel("Share of total spend")
+    plt.tight_layout()
+    plt.savefig(path, dpi=150)
+    plt.close()
+"@
+
+Write-TextFile "$RepoPath\src\run_analysis.py" @"
+from __future__ import annotations
+
+import argparse
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Dict, Iterable, List, Tuple
+
+import numpy as np
+import pandas as pd
+
+from data import build_processed, clean_data, normalize_columns, validate_schema, validate_values, validate_no_missing
+from data_summary import write_summary
+from estimation import bootstrap_ci, estimate_diff_in_means, holm_adjust
+from experiment_checks import balance_table
+from plots import plot_arm_sizes, plot_outcome_means_ci, plot_uplift_ci, plot_influence_top_share
+from hillstrom_emails.cleaning import normalize_arm
+from hillstrom_emails.config import load_config
+from hillstrom_emails.checks import srm_check
+from robustness_suite import compute_robustness
+from two_part import summarize_two_part
+from comparisons import mens_vs_womens
+from influence import build_influence_table
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Hillstrom experiment analysis runner")
+    parser.add_argument("--config", required=True, help="Path to config YAML")
+    parser.add_argument("--output", required=True, help="Output directory")
+    return parser.parse_args()
+
+
+def _bootstrap_mean_ci(values: np.ndarray, n_boot: int, seed: int, alpha: float = 0.05) -> Tuple[float, float]:
+    rng = np.random.default_rng(seed)
+    n = len(values)
+    if n == 0:
+        return float("nan"), float("nan")
+    means = np.empty(n_boot, dtype=float)
+    for i in range(n_boot):
+        means[i] = rng.choice(values, size=n, replace=True).mean()
+    lower = float(np.percentile(means, 100 * (alpha / 2)))
+    upper = float(np.percentile(means, 100 * (1 - alpha / 2)))
+    return lower, upper
+
+
+def _canonicalize_arms(df: pd.DataFrame, arm_col: str, arm_map: Dict[str, List[str]]) -> pd.DataFrame:
+    df = df.copy()
+    df["arm"] = df[arm_col].apply(lambda v: normalize_arm(v, arm_map))
+    return df[df["arm"].notna()].copy()
+
+
+def _arm_sizes(df: pd.DataFrame) -> pd.DataFrame:
+    counts = df["arm"].value_counts(dropna=False)
+    return pd.DataFrame({"arm": counts.index.astype(str), "count": counts.values})
+
+
+def _outcome_means_ci(
+    df: pd.DataFrame,
+    outcomes: Iterable[str],
+    n_boot: int,
+    seed: int,
+) -> pd.DataFrame:
+    rows = []
+    for outcome in outcomes:
+        for arm, group in df.groupby("arm"):
+            values = pd.to_numeric(group[outcome], errors="coerce").dropna().to_numpy()
+            mean = float(np.mean(values)) if len(values) else float("nan")
+            ci_low, ci_high = _bootstrap_mean_ci(values, n_boot, seed)
+            rows.append(
+                {
+                    "outcome": outcome,
+                    "arm": arm,
+                    "mean": mean,
+                    "ci_low": ci_low,
+                    "ci_high": ci_high,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def _uplift_ci(
+    df: pd.DataFrame,
+    outcomes: Iterable[str],
+    control_arm: str,
+    n_boot: int,
+    seed: int,
+) -> pd.DataFrame:
+    rows = []
+    treat_arms = sorted(a for a in df["arm"].unique() if a != control_arm)
+    for outcome in outcomes:
+        for arm in treat_arms:
+            estimate, se, ci_low, ci_high, p_value = estimate_diff_in_means(df, outcome, "arm", arm, control_arm)
+            t = pd.to_numeric(df[df["arm"] == arm][outcome], errors="coerce").dropna().to_numpy()
+            c = pd.to_numeric(df[df["arm"] == control_arm][outcome], errors="coerce").dropna().to_numpy()
+            boot_low, boot_high = bootstrap_ci(t, c, n_boot=n_boot, seed=seed)
+            rows.append(
+                {
+                    "outcome": outcome,
+                    "arm": arm,
+                    "estimate": estimate,
+                    "se": se,
+                    "ci_low": boot_low,
+                    "ci_high": boot_high,
+                    "p_value": p_value,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def _bootstrap_p_one_sided(treat: np.ndarray, control: np.ndarray, n_boot: int, seed: int) -> float:
+    diffs = np.empty(n_boot, dtype=float)
+    rng = np.random.default_rng(seed)
+    for i in range(n_boot):
+        t = rng.choice(treat, size=len(treat), replace=True)
+        c = rng.choice(control, size=len(control), replace=True)
+        diffs[i] = t.mean() - c.mean()
+    return float((np.sum(diffs <= 0.0) + 1.0) / (len(diffs) + 1.0))
+
+
+def main() -> None:
+    args = parse_args()
+    cfg = load_config(args.config)
+    data_cfg = cfg["data"]
+    output_dir = Path(args.output)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    tables_dir = output_dir / "tables"
+    figures_dir = output_dir / "figures"
+    tables_dir.mkdir(parents=True, exist_ok=True)
+    figures_dir.mkdir(parents=True, exist_ok=True)
+
+    raw_dir = data_cfg.get("raw_dir")
+    processed_path = data_cfg.get("processed_path", "data/processed/hillstrom_clean.csv")
+    if raw_dir:
+        processed = build_processed(Path(raw_dir), Path(processed_path))
+        df = pd.read_csv(processed)
+    else:
+        df = pd.read_csv(data_cfg["input_csv"])
+        df = normalize_columns(df)
+        validate_schema(df)
+        validate_values(df)
+        validate_no_missing(df)
+        df = clean_data(df)
+        Path(processed_path).parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(processed_path, index=False)
+
+    write_summary(df, output_dir)
+
+    df = _canonicalize_arms(df, data_cfg["arm_col"], data_cfg["arm_map"])
+
+    margin = cfg["profit"]["margin"]
+    email_cost = cfg["profit"]["email_cost"]
+    df["emailed"] = df["arm"].isin(["mens", "womens"]).astype(int)
+    df["profit"] = margin * df[data_cfg["spend_col"]] - email_cost * df["emailed"]
+
+    outcomes = ["profit", data_cfg["visit_col"], data_cfg["conversion_col"], data_cfg["spend_col"]]
+
+    n_boot = int(cfg["bootstrap"]["iterations"])
+    seed = int(cfg["bootstrap"]["seed"])
+
+    arm_sizes = _arm_sizes(df)
+    arm_sizes.to_csv(tables_dir / "arm_sizes.csv", index=False)
+    plot_arm_sizes(arm_sizes, figures_dir / "arm_sizes.png")
+
+    outcome_means = _outcome_means_ci(df, outcomes, n_boot, seed)
+    outcome_means.to_csv(tables_dir / "outcome_means_ci.csv", index=False)
+    plot_outcome_means_ci(outcome_means, figures_dir)
+
+    uplift = _uplift_ci(df, outcomes, "control", n_boot, seed)
+    if not uplift.empty:
+        profit_mask = uplift["outcome"] == "profit"
+        if profit_mask.any():
+            uplift.loc[profit_mask, "p_value_holm"] = holm_adjust(uplift.loc[profit_mask, "p_value"])
+        else:
+            uplift["p_value_holm"] = np.nan
+    uplift.to_csv(tables_dir / "uplift_ci.csv", index=False)
+    plot_uplift_ci(uplift, figures_dir)
+
+    guardrails = []
+    for metric, delta_pp in [
+        (data_cfg["visit_col"], cfg["guardrails"]["visit_delta_pp"]),
+        (data_cfg["conversion_col"], cfg["guardrails"]["conversion_delta_pp"]),
+    ]:
+        sub = uplift[uplift["outcome"] == metric].copy()
+        if sub.empty:
+            continue
+        for _, row in sub.iterrows():
+            ci_low_pp = row["ci_low"] * 100.0
+            ci_high_pp = row["ci_high"] * 100.0
+            guardrails.append(
+                {
+                    "arm": row["arm"],
+                    "metric": metric,
+                    "delta_hat_pp": row["estimate"] * 100.0,
+                    "ci_low_pp": ci_low_pp,
+                    "ci_high_pp": ci_high_pp,
+                    "threshold_pp": delta_pp,
+                    "pass": ci_low_pp >= float(delta_pp),
+                }
+            )
+    guardrails_df = pd.DataFrame(guardrails)
+    guardrails_df.to_csv(tables_dir / "guardrails.csv", index=False)
+
+    srm = srm_check(df, cfg)
+    srm["table"].to_csv(tables_dir / "srm.csv", index=False)
+    balance = balance_table(df, data_cfg.get("balance_covariates", []), "arm", "control")
+    balance.to_csv(tables_dir / "balance.csv", index=False)
+
+    profit_uplift = uplift[uplift["outcome"] == "profit"].copy()
+    if not profit_uplift.empty:
+        p_vals = []
+        for _, row in profit_uplift.iterrows():
+            arm = row["arm"]
+            t = pd.to_numeric(df[df["arm"] == arm]["profit"], errors="coerce").dropna().to_numpy()
+            c = pd.to_numeric(df[df["arm"] == "control"]["profit"], errors="coerce").dropna().to_numpy()
+            p_vals.append(_bootstrap_p_one_sided(t, c, n_boot, seed))
+        profit_uplift["p_value_raw"] = p_vals
+        profit_uplift["p_value_holm"] = holm_adjust(profit_uplift["p_value_raw"].to_numpy())
+        profit_uplift["reject_holm"] = profit_uplift["p_value_holm"] < 0.05
+        mes = float(cfg["mes"]["min_effect"])
+        profit_uplift["mes_pass"] = profit_uplift["estimate"] >= mes
+        guardrail_pass = guardrails_df.pivot_table(index="arm", values="pass", aggfunc="all").reset_index()
+        guardrail_pass = guardrail_pass.rename(columns={"pass": "guardrails_pass"})
+        main_results = profit_uplift.merge(guardrail_pass, on="arm", how="left")
+        main_results["n"] = main_results["arm"].apply(lambda a: int((df["arm"] == a).sum()))
+        main_results["mean_profit"] = main_results["arm"].apply(
+            lambda a: float(pd.to_numeric(df[df["arm"] == a]["profit"], errors="coerce").mean())
+        )
+        visit_pass = guardrails_df[guardrails_df["metric"] == data_cfg["visit_col"]][["arm", "pass"]]
+        conv_pass = guardrails_df[guardrails_df["metric"] == data_cfg["conversion_col"]][["arm", "pass"]]
+        main_results = main_results.merge(
+            visit_pass.rename(columns={"pass": "guardrail_visit_pass"}), on="arm", how="left"
+        )
+        main_results = main_results.merge(
+            conv_pass.rename(columns={"pass": "guardrail_conversion_pass"}), on="arm", how="left"
+        )
+        main_results["eligible"] = (
+            main_results["reject_holm"] & main_results["mes_pass"] & main_results["guardrails_pass"]
+        )
+        selected_arm = None
+        eligible = main_results[main_results["eligible"]]
+        if not eligible.empty:
+            selected_arm = eligible.sort_values("estimate", ascending=False).iloc[0]["arm"]
+        main_results["selected"] = main_results["arm"] == selected_arm
+        main_results["note"] = "primary_one_sided;mens_vs_womens_exploratory"
+        main_results = main_results.rename(
+            columns={
+                "estimate": "tau_hat",
+                "ci_low": "ci_lower",
+                "ci_high": "ci_upper",
+            }
+        )
+        main_results = main_results[
+            [
+                "arm",
+                "n",
+                "mean_profit",
+                "tau_hat",
+                "ci_lower",
+                "ci_upper",
+                "p_value_raw",
+                "p_value_holm",
+                "reject_holm",
+                "mes_pass",
+                "guardrail_visit_pass",
+                "guardrail_conversion_pass",
+                "guardrails_pass",
+                "eligible",
+                "selected",
+                "note",
+            ]
+        ]
+    else:
+        main_results = pd.DataFrame()
+    main_results.to_csv(tables_dir / "main_results.csv", index=False)
+
+    robustness = compute_robustness(
+        df,
+        spend_col=data_cfg["spend_col"],
+        margin=cfg["profit"]["margin"],
+        email_cost=cfg["profit"]["email_cost"],
+        n_boot=n_boot,
+        seed=seed,
+    )
+    robustness.to_csv(tables_dir / "robustness.csv", index=False)
+
+    two_part = summarize_two_part(
+        df,
+        arm_col="arm",
+        conversion_col=data_cfg["conversion_col"],
+        spend_col=data_cfg["spend_col"],
+        control_arm="control",
+        n_boot=n_boot,
+        seed=seed,
+    )
+    two_part.to_csv(tables_dir / "two_part.csv", index=False)
+
+    rows = []
+    for outcome in ["profit", data_cfg["spend_col"]]:
+        est, ci_low, ci_high, p_value = mens_vs_womens(df, outcome, "arm", n_boot, seed)
+        rows.append(
+            {
+                "outcome": outcome,
+                "estimate": est,
+                "ci_lower": ci_low,
+                "ci_upper": ci_high,
+                "p_value_two_sided": p_value,
+                "notes": "exploratory_two_sided",
+            }
+        )
+    mens_womens = pd.DataFrame(rows)
+    mens_womens.to_csv(tables_dir / "mens_vs_womens.csv", index=False)
+
+    influence = build_influence_table(df, data_cfg["spend_col"], "arm", "control")
+    influence.to_csv(tables_dir / "influence.csv", index=False)
+    plot_influence_top_share(influence, figures_dir / "influence_top_share.png")
+
+    metadata = {
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "input_csv": data_cfg.get("input_csv"),
+        "rows_clean": int(len(df)),
+        "health": {
+            "srm_flagged": bool(srm["flagged"]),
+        },
+        "inference": {
+            "primary": "one_sided_bootstrap",
+            "exploratory": "two_sided_bootstrap",
+        },
+    }
+    with open(output_dir / "run_metadata.json", "w", encoding="utf-8") as f:
+        json.dump(metadata, f, indent=2)
+
+
+if __name__ == "__main__":
+    main()
 "@
 
 Write-TextFile "$RepoPath\data\raw\.gitkeep" ""
@@ -2197,4 +3237,7 @@ Write-TextFile "$RepoPath\outputs\tables\.gitkeep" ""
 Write-TextFile "$RepoPath\outputs\figures\.gitkeep" ""
 
 Write-Host "Initialized repo scaffold at $RepoPath"
+
+
+
 

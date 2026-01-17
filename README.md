@@ -8,19 +8,19 @@ Research-grade analysis pipeline for the Hillstrom email marketing experiment (M
 - notebooks/: exploration (kept separate from pipeline)
 - reports/: experiment spec, analysis plan, decision memo
 - data/: raw and processed data
-- outputs/: tables, figures, run metadata
+- reports/: tables, figures, run metadata
 
 ## Setup
 1) Ensure uv is installed and available on PATH.
 2) Place the dataset CSV at the configured path (see config/config.yaml).
 
 ## Run pipeline
-`powershell
-scripts\run.ps1 -ConfigPath config\config.yaml -OutputDir outputs
-`
+```powershell
+scripts\run.ps1 -ConfigPath config\config.yaml -OutputDir reports
+```
 
 ## Results table headings (exact)
-Main results table (outputs/tables/main_results.csv):
+Main results table (reports/tables/main_results.csv):
 - arm
 - n
 - mean_profit
@@ -37,7 +37,7 @@ Main results table (outputs/tables/main_results.csv):
 - eligible
 - selected
 
-Guardrails table (outputs/tables/guardrails.csv):
+Guardrails table (reports/tables/guardrails.csv):
 - arm
 - metric
 - delta_hat_pp
@@ -46,19 +46,19 @@ Guardrails table (outputs/tables/guardrails.csv):
 - threshold_pp
 - pass
 
-Robustness grid (outputs/tables/robustness.csv):
+Robustness grid (reports/tables/robustness.csv):
 - method
 - arm
 - tau_hat
 
-Balance table (outputs/tables/balance.csv):
+Balance table (reports/tables/balance.csv):
 - covariate
 - arm
 - smd
 - abs_smd
 - flag
 
-SRM table (outputs/tables/srm.csv):
+SRM table (reports/tables/srm.csv):
 - arm
 - observed
 - expected
@@ -67,11 +67,11 @@ SRM table (outputs/tables/srm.csv):
 - p_value
 - flagged
 
-Cleaning report (outputs/tables/cleaning.csv):
+Cleaning report (reports/tables/cleaning.csv):
 - metric
 - count
 
-Adjusted ATE table (outputs/tables/adjusted_ate.csv):
+Adjusted ATE table (reports/tables/adjusted_ate.csv):
 - arm
 - coef
 - p_value_one_sided
