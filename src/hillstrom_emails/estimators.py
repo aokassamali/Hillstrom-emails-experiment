@@ -105,12 +105,25 @@ def adjusted_ate(df: pd.DataFrame, cfg: Dict[str, Any]) -> pd.DataFrame:
 
     X = pd.concat([df[["mens", "womens"]], design], axis=1)
     X = sm.add_constant(X)
-    model = sm.OLS(df["profit"], X).fit(cov_type="HC3")
+    X = X.apply(pd.to_numeric, errors="coerce")
+    y = pd.to_numeric(df["profit"], errors="coerce")
+    valid = ~(X.isna().any(axis=1) | y.isna())
+    X = X.loc[valid]
+    y = y.loc[valid]
+
+    if X.empty:
+        return pd.DataFrame(columns=["arm", "coef", "p_value_one_sided"])
+
+    cols = list(X.columns)
+    X_np = X.to_numpy(dtype=float)
+    y_np = y.to_numpy(dtype=float)
+    model = sm.OLS(y_np, X_np).fit(cov_type="HC3")
 
     rows = []
     for arm in ["mens", "womens"]:
-        coef = model.params[arm]
-        p_value = model.pvalues[arm] / 2.0 if coef > 0 else 1.0 - (model.pvalues[arm] / 2.0)
+        idx = cols.index(arm)
+        coef = model.params[idx]
+        p_value = model.pvalues[idx] / 2.0 if coef > 0 else 1.0 - (model.pvalues[idx] / 2.0)
         rows.append({"arm": arm, "coef": float(coef), "p_value_one_sided": float(p_value)})
 
     return pd.DataFrame(rows)
