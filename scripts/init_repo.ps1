@@ -3076,9 +3076,13 @@ def main() -> None:
     raw_dir = data_cfg.get("raw_dir")
     processed_path = data_cfg.get("processed_path", "data/processed/hillstrom_clean.csv")
     if raw_dir:
-        processed = build_processed(Path(raw_dir), Path(processed_path))
-        df = pd.read_csv(processed)
-    else:
+        try:
+            processed = build_processed(Path(raw_dir), Path(processed_path))
+            df = pd.read_csv(processed)
+        except FileNotFoundError:
+            raw_dir = None
+
+    if not raw_dir:
         df = pd.read_csv(data_cfg["input_csv"])
         df = normalize_columns(df)
         validate_schema(df)
