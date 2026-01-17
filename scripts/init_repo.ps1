@@ -165,27 +165,28 @@ project:
 data:
   input_csv: C:\Users\aokas\Downloads\emaildataset
   id_col: customer_id
-  arm_col: segment
+  arm_col: Segment
   arm_map:
     control:
-      - control
       - no e-mail
       - no email
-      - no e-mail
-      - no email
+      - No E-Mail
+      - No Email
     mens:
-      - mens
       - mens e-mail
       - mens email
+      - Mens E-Mail
+      - Mens Email
     womens:
-      - womens
       - womens e-mail
       - womens email
-  visit_col: visit
-  conversion_col: conversion
-  spend_col: spend
+      - Womens E-Mail
+      - Womens Email
+  visit_col: Visit
+  conversion_col: Conversion
+  spend_col: Spend
   balance_covariates:
-    - Recency  # TODO: confirm exact column casing in the CSV
+    - Recency
     - History
     - History_Segment
     - Mens
@@ -194,7 +195,7 @@ data:
     - Newbie
     - Channel
   adjustment_covariates:
-    - Recency  # TODO: confirm exact column casing in the CSV
+    - Recency
     - History
     - Newbie
     - Mens
