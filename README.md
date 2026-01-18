@@ -16,8 +16,8 @@ This repository is an end-to-end, research-grade experimentation workflow using 
 
 | Comparison | Profit uplift \(\hat\tau\) | 95% CI | Holm p | MES | Guardrails | Outcome |
 |---|---:|---:|---:|---:|---:|---|
-| **Mens vs Control** | **+0.298** | [0.185, 0.415] | ~0.00020 | ✅ | ✅ | ✅ **Ship** |
-| **Womens vs Control** | **+0.160** | [0.058, 0.263] | ~0.00110 | ✅ | ✅ | Eligible but not selected |
+| **Mens vs Control** | **+0.298** | [0.185, 0.415] | ~0.00020 | Passes | Passes | **Ship** |
+| **Womens vs Control** | **+0.160** | [0.058, 0.263] | ~0.00110 | Passes | Passes | Eligible but not selected |
 
 **Targeting extension (Mens vs none, DR policy value):**
 - treat_all_mens: **0.558715** (CI [0.469296, 0.654596]), treated_rate 1.000000  
@@ -26,11 +26,9 @@ This repository is an end-to-end, research-grade experimentation workflow using 
 
 ---
 
-## What this repo is demonstrating (and what it is not)
+## HTE Extension
 
-- This repo prioritizes **decision quality and business value** over technique.
-- The **core readout** (health → ATE → robustness → memo) is the primary deliverable.
-- The **HTE/targeting extension** is intentionally separate and held to a strict standard: it must beat a strong baseline (treat-all Mens) under honest evaluation. It does not here, and that is treated as a valid, decision-relevant result.
+- The **HTE/targeting extension** is intentionally separate and held to a strict standard: it must beat a strong baseline (treat-all Mens) under honest evaluation. It does not here, and so I didn't continue pursuing it to increase lift.
 
 ---
 
@@ -115,15 +113,11 @@ uv sync
 uv run python -m run_analysis --config config/config.yaml --output reports
 ```
 
-If the HTE extension is runnable separately:
+HTE extension is runnable separately:
 
 ```bash
 uv run python -m heterogeneity --config config/config.yaml --output reports/extension
 ```
-
-> If your repo uses `outputs/` instead of `reports/`, replace the paths above accordingly.
-
----
 
 ## Artifact map (where to find everything)
 
