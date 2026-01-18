@@ -1,0 +1,25 @@
+{
+  "timestamp_utc": "2026-01-17T20:24:38.298550+00:00",
+  "input_csv": "C:\\Users\\aokas\\Downloads\\emaildataset\\Kevin_Hillstrom_MineThatData_E-MailAnalytics_DataMiningChallenge_2008.03.20.csv",
+  "rows_clean": 64000,
+  "health": {
+    "srm_flagged": false,
+    "health_pass": true
+  },
+  "inference": {
+    "primary": "one_sided_bootstrap",
+    "exploratory": "two_sided_bootstrap"
+  },
+  "srm": {
+    "expected_allocation": {
+      "control": 0.3333333333,
+      "mens": 0.3333333333,
+      "womens": 0.3333333333
+    }
+  },
+  "bootstrap": {
+    "B": 10000,
+    "seed": 20240101
+  },
+  "git_commit": "eb5ef512855b27733efe66d0d2709123109129c2"
+}

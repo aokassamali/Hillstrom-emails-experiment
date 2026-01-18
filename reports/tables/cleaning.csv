@@ -1,0 +1,7 @@
+metric,count
+rows_raw,64000
+rows_missing_arm,0
+rows_negative_spend,0
+rows_duplicate_ids_dropped,0
+rows_spend_na_set_to_zero,0
+rows_clean,64000
