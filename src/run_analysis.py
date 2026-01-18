@@ -414,6 +414,71 @@ def main() -> None:
         tail_df.to_csv(tables_dir / "tail_sensitivity_profit_ci.csv", index=False)
         tail_df[["arm", "x_removed", "tau_hat"]].to_csv(tables_dir / "tail_sensitivity_profit.csv", index=False)
         plot_tail_sensitivity(tail_df, figures_dir / "tail_sensitivity_profit.png")
+
+        # Tail sensitivity among positive spenders only
+        pos_rows = []
+        for x in [0.0, 0.05, 0.10, 0.20]:
+            for arm in ["mens", "womens"]:
+                t = df[df["arm"] == arm].copy()
+                c = df[df["arm"] == "control"].copy()
+                t_spend = pd.to_numeric(t[data_cfg["spend_col"]], errors="coerce").fillna(0.0).to_numpy()
+                c_spend = pd.to_numeric(c[data_cfg["spend_col"]], errors="coerce").fillna(0.0).to_numpy()
+                t_ids = t[id_col].astype(str).to_numpy()
+                c_ids = c[id_col].astype(str).to_numpy()
+
+                if x > 0:
+                    t_pos = t_spend > 0
+                    c_pos = c_spend > 0
+                    t_k = int(np.ceil(x * int(t_pos.sum())))
+                    c_k = int(np.ceil(x * int(c_pos.sum())))
+
+                    t_pos_idx = np.flatnonzero(t_pos)
+                    c_pos_idx = np.flatnonzero(c_pos)
+                    t_idx = _top_k_indices(t_spend[t_pos], t_ids[t_pos], t_k)
+                    c_idx = _top_k_indices(c_spend[c_pos], c_ids[c_pos], c_k)
+
+                    t = t.drop(t.index[t_pos_idx[t_idx]])
+                    c = c.drop(c.index[c_pos_idx[c_idx]])
+
+                t_profit = cfg["profit"]["margin"] * t[data_cfg["spend_col"]] - cfg["profit"]["email_cost"] * t["emailed"]
+                c_profit = cfg["profit"]["margin"] * c[data_cfg["spend_col"]] - cfg["profit"]["email_cost"] * c["emailed"]
+                tau = float(t_profit.mean() - c_profit.mean()) if len(t_profit) and len(c_profit) else float("nan")
+                if len(t_profit) and len(c_profit):
+                    stream = f"tail_sensitivity_pos_only|metric=profit|arm={arm}|x={x:.3f}"
+                    diffs = bootstrap_diffs(
+                        t_profit.to_numpy(),
+                        c_profit.to_numpy(),
+                        n_boot=n_boot,
+                        seed=seed,
+                        stream=stream,
+                    )
+                    ci_low, ci_high = bootstrap_ci_from_diffs(diffs)
+                else:
+                    ci_low, ci_high = float("nan"), float("nan")
+                pos_rows.append(
+                    {
+                        "arm": arm,
+                        "x_removed": x,
+                        "tau_hat": tau,
+                        "ci_low": ci_low,
+                        "ci_high": ci_high,
+                    }
+                )
+        pos_df = pd.DataFrame(pos_rows)
+        pos_df.to_csv(tables_dir / "tail_sensitivity_pos_only_profit_ci.csv", index=False)
+        plot_tail_sensitivity(pos_df, figures_dir / "tail_sensitivity_pos_only_profit.png")
+
+        # Tail-risk summary from tail sensitivity
+        tail_risk_rows = []
+        mes_threshold = 0.05
+        for arm, group in tail_df.groupby("arm"):
+            group = group.sort_values("x_removed")
+            below = group[group["tau_hat"] < mes_threshold]
+            x_star = float(below.iloc[0]["x_removed"]) if not below.empty else float("nan")
+            tail_risk_rows.append(
+                {"arm": arm, "x_star": x_star, "mes": mes_threshold, "notes": "x_star=min_x_with_tau_hat_lt_mes"}
+            )
+        pd.DataFrame(tail_risk_rows).to_csv(tables_dir / "tail_risk_summary.csv", index=False)
     else:
         pd.DataFrame().to_csv(tables_dir / "robustness.csv", index=False)
         pd.DataFrame().to_csv(tables_dir / "two_part.csv", index=False)
@@ -421,6 +486,8 @@ def main() -> None:
         pd.DataFrame().to_csv(tables_dir / "influence.csv", index=False)
         pd.DataFrame().to_csv(tables_dir / "tail_sensitivity_profit_ci.csv", index=False)
         pd.DataFrame().to_csv(tables_dir / "tail_sensitivity_profit.csv", index=False)
+        pd.DataFrame().to_csv(tables_dir / "tail_sensitivity_pos_only_profit_ci.csv", index=False)
+        pd.DataFrame().to_csv(tables_dir / "tail_risk_summary.csv", index=False)
         pd.DataFrame().to_csv(tables_dir / "profit_sensitivity_grid.csv", index=False)
 
     git_hash = None

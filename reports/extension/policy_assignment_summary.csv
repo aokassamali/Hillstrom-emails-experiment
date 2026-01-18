@@ -1,0 +1,10 @@
+policy,assigned_control,assigned_mens,assigned_womens,treated_rate,method,k
+treat_none,1.0,0.0,0.0,0.0,t_learner,
+treat_all_mens,0.0,1.0,0.0,1.0,t_learner,
+treat_all_womens,0.0,0.0,1.0,1.0,t_learner,
+send_or_not_mens,0.39921875,0.60078125,0.0,0.60078125,t_learner,
+best_of_three,0.22365625,0.4215625,0.35478125,0.77634375,t_learner,
+top_k_best_of_three,0.99,0.00696875,0.00303125,0.010000000000000009,t_learner,0.01
+top_k_best_of_three,0.95,0.02896875,0.02103125,0.050000000000000044,t_learner,0.05
+top_k_best_of_three,0.9,0.0613125,0.0386875,0.09999999999999998,t_learner,0.1
+top_k_best_of_three,0.8,0.12153125,0.07846875,0.19999999999999996,t_learner,0.2

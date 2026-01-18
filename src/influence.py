@@ -10,7 +10,7 @@ def _arm_positive_summary(df: pd.DataFrame, spend_col: str, arm_col: str) -> pd.
     spend = pd.to_numeric(df[spend_col], errors="coerce").fillna(0.0)
     grouped = df.assign(_spend=spend).groupby(arm_col)
     summary = grouped["_spend"].agg(n="size", n_pos=lambda s: int((s > 0).sum())).reset_index()
-    summary["pct_spend_pos"] = summary.apply(
+    summary["pos_rate"] = summary.apply(
         lambda row: float(row["n_pos"]) / float(row["n"]) if row["n"] else 0.0, axis=1
     )
     return summary
@@ -141,7 +141,7 @@ def build_influence_table(
         share = top_share(df, spend_col, arm_col, id_col, pct)
         share["notes"] = "rank_top_share"
         if np.isclose(pct, 0.01):
-            share["notes"] = "rank_top_share;top_share_1pct_can_be_1_when_pos_share_lt_1pct"
+            share["notes"] = "rank_top_share;top_share_1pct_can_be_1_when_pos_rate_lt_1pct"
         frames.append(share)
 
     for pct in pct_list:

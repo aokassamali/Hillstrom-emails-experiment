@@ -10,6 +10,7 @@ dependencies = [
   "scipy>=1.11",
   "statsmodels>=0.14",
   "matplotlib>=3.8",
+  "scikit-learn>=1.4",
   "pyyaml>=6.0",
 ]
 

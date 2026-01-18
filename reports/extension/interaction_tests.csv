@@ -1,0 +1,6 @@
+group,p_value_spend,p_value_profit,notes
+history_segment,0.09660930848937731,0.09660930848937589,mens_vs_control
+newbie,0.18842828378947243,0.18842828378947155,mens_vs_control
+channel,0.2587545651315856,0.2587545651315853,mens_vs_control
+recency_quartile,0.5259421195447248,0.5259421195447196,mens_vs_control
+history_quartile,0.5754620557268282,0.5754620557268257,mens_vs_control

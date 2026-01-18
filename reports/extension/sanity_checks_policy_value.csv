@@ -1,0 +1,4 @@
+policy,arm,ipw_value,arm_mean,abs_diff,flag,notes
+treat_none,control,0.26078118750000007,0.2611157420444945,0.00033455454449443645,False,ipw_vs_within_arm_mean
+treat_all_mens,mens,0.5583565312500001,0.5590466044023091,0.0006900731523090675,False,ipw_vs_within_arm_mean
+treat_all_womens,womens,0.42193940625000004,0.4208806284191332,0.0010587778308668305,False,ipw_vs_within_arm_mean
