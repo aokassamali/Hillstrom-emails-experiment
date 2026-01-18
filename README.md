@@ -145,7 +145,7 @@ uv run python -m heterogeneity --config config/config.yaml --output reports/exte
 - `reports/extension/*`
 
 ### Decision memo
-- `reports/decision_memo.md`
+- [Decision Memo](reports/decision_memo.md)
 
 ---
 
