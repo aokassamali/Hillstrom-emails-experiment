@@ -1,6 +1,6 @@
-# Hillstrom Email Experiment — Research-Grade A/B Testing + Decision Readout
+# Hillstrom Email Experiment — A/B Testing + Decision Readout
 
-This repository is an end-to-end, research-grade experimentation workflow using the **Hillstrom email marketing dataset** (3-arm randomized controlled trial). It includes a preregistered-style spec, a pre-analysis plan, experiment health checks, robust inference with multiple comparisons control, a decision memo, and a targeting/HTE extension that is evaluated honestly and **fails gracefully** when it doesn’t add business value.
+This repository is an end-to-end experimentation workflow using the **Hillstrom email marketing dataset** (3-arm randomized controlled trial). It includes a preregistered-style spec, a pre-analysis plan, experiment health checks, robust inference with multiple comparisons control, a decision memo, and a targeting/HTE extension that is evaluated honestly and **fails gracefully** when it doesn’t add business value.
 
 > **Bottom line:** both email treatments increase profit vs control; **Mens e-mail** is the recommended default.  
 > A targeting/uplift extension was implemented correctly, but shows **weak learnable heterogeneity** with available pre-treatment features; targeting underperforms **treat-all Mens**.
